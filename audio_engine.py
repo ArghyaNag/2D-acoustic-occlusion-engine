@@ -56,6 +56,7 @@ class AudioEngine:
         # happen is reading a stale frame, which is acceptable for visualisation.
         self._last_raw: dict[int, Optional[np.ndarray]] = {}
         self._last_processed: dict[int, Optional[np.ndarray]] = {}
+        self._last_mix: Optional[np.ndarray] = None
 
         self._stream: Optional[sd.OutputStream] = None
 
@@ -106,6 +107,10 @@ class AudioEngine:
     def get_last_processed(self, source_id: int) -> Optional[np.ndarray]:
         """Return the last processed stereo chunk for *source_id*, or None."""
         return self._last_processed.get(source_id)
+
+    def get_last_mix(self) -> Optional[np.ndarray]:
+        """Return the last mixed stereo output block, or None."""
+        return self._last_mix
 
     # ------------------------------------------------------------------
     # Audio callback (runs on PortAudio thread — NO blocking/alloc/IO!)
@@ -200,6 +205,7 @@ class AudioEngine:
         if active_count > 1:
             mix = np.tanh(mix)
 
+        self._last_mix = mix.copy()
         outdata[:] = mix
 
     # ------------------------------------------------------------------

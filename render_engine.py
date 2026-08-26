@@ -8,8 +8,8 @@ and renders waveform graphs in the right sidebar.
 Layout:
   ┌──────────┬────────────────────────┬──────────────┐
   │  LEFT    │       GRID AREA        │    RIGHT     │
-  │ SIDEBAR  │ GRID_COLS * CELL_SIZE  │   SIDEBAR    │
-  │  250 px  │                        │   300 px     │
+  │ SIDEBAR  │ GRID_COLS * cell_size  │   SIDEBAR    │
+  │  250 px  │                        │  (flexible)  │
   └──────────┴────────────────────────┴──────────────┘
 """
 
@@ -24,6 +24,12 @@ import pygame
 
 from shared_state import SharedState, GRID_COLS, GRID_ROWS, CELL_SIZE_PX
 from audio_engine import AudioEngine
+from viz_engine import (
+    compute_display_samples,
+    downsample_for_width,
+    RAW_DISPLAY_MULTIPLIER,
+    PROCESSED_DISPLAY_MULTIPLIER,
+)
 
 # ---------------------------------------------------------------------------
 # Layout constants
@@ -102,11 +108,21 @@ class RenderEngine:
 
         pygame.init()
         pygame.display.set_caption("3D Positional Audio Sandbox — Mode 1")
-        self._screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
+        info = pygame.display.Info()
+
+        # FIX 2: Subtract margin so window has visible title bar and chrome
+        window_w = info.current_w - 100
+        window_h = info.current_h - 100
+        self._screen = pygame.display.set_mode((window_w, window_h), pygame.RESIZABLE)
+
         self._clock = pygame.time.Clock()
         self._font = pygame.font.SysFont("consolas", 14)
         self._font_sm = pygame.font.SysFont("consolas", 12)
         self._font_lg = pygame.font.SysFont("consolas", 16, bold=True)
+
+        # FIX 1: Dynamic cell size attribute
+        self._cell_size: int = CELL_SIZE_PX
+        self._update_layout()
 
         # ---- UI state ----
         self._running: bool = True
@@ -116,6 +132,18 @@ class RenderEngine:
         self._wall_tool: int = WALL_OFF
         self._wall_painting: bool = False  # True while mouse is held for wall drawing
         self._selected_source_id: Optional[int] = None
+
+        # Control rects
+        self._load_audio_btn_rect: Optional[pygame.Rect] = None
+        self._loop_toggle_rect: Optional[pygame.Rect] = None
+        self._pause_btn_rect: Optional[pygame.Rect] = None
+
+    def _update_layout(self) -> None:
+        """Recompute dynamic cell size based on current window dimensions."""
+        win_w, win_h = self._screen.get_size()
+        avail_w = max(1, win_w - LEFT_SIDEBAR_W - RIGHT_SIDEBAR_W)
+        avail_h = max(1, win_h)
+        self._cell_size = max(1, min(avail_w // GRID_COLS, avail_h // GRID_ROWS))
 
     # ------------------------------------------------------------------
     # Coordinate helpers
@@ -127,8 +155,8 @@ class RenderEngine:
     def _pixel_to_grid(self, px: int, py: int) -> Optional[tuple[int, int]]:
         """Convert pixel coords to grid cell, or None if outside the grid."""
         gx_origin, gy_origin = self._grid_origin()
-        gx = (px - gx_origin) // CELL_SIZE_PX
-        gy = (py - gy_origin) // CELL_SIZE_PX
+        gx = (px - gx_origin) // self._cell_size
+        gy = (py - gy_origin) // self._cell_size
         if 0 <= gx < GRID_COLS and 0 <= gy < GRID_ROWS:
             return (gx, gy)
         return None
@@ -136,31 +164,42 @@ class RenderEngine:
     def _grid_to_pixel_center(self, gx: int, gy: int) -> tuple[int, int]:
         """Return the pixel center of grid cell (gx, gy)."""
         ox, oy = self._grid_origin()
-        return (ox + gx * CELL_SIZE_PX + CELL_SIZE_PX // 2,
-                oy + gy * CELL_SIZE_PX + CELL_SIZE_PX // 2)
+        return (
+            ox + gx * self._cell_size + self._cell_size // 2,
+            oy + gy * self._cell_size + self._cell_size // 2,
+        )
 
     # ------------------------------------------------------------------
     # Drawing helpers
     # ------------------------------------------------------------------
     def _draw_grid(self) -> None:
         ox, oy = self._grid_origin()
+        grid_draw_w = GRID_COLS * self._cell_size
+        grid_draw_h = GRID_ROWS * self._cell_size
+
         # Background
-        pygame.draw.rect(self._screen, COL_BG, (ox, oy, GRID_W, GRID_H))
+        pygame.draw.rect(self._screen, COL_BG, (ox, oy, grid_draw_w, grid_draw_h))
+
         # Vertical lines
         for c in range(GRID_COLS + 1):
-            x = ox + c * CELL_SIZE_PX
-            pygame.draw.line(self._screen, COL_GRID_LINE, (x, oy), (x, oy + GRID_H))
+            x = ox + c * self._cell_size
+            pygame.draw.line(self._screen, COL_GRID_LINE, (x, oy), (x, oy + grid_draw_h))
+
         # Horizontal lines
         for r in range(GRID_ROWS + 1):
-            y = oy + r * CELL_SIZE_PX
-            pygame.draw.line(self._screen, COL_GRID_LINE, (ox, y), (ox + GRID_W, y))
+            y = oy + r * self._cell_size
+            pygame.draw.line(self._screen, COL_GRID_LINE, (ox, y), (ox + grid_draw_w, y))
 
     def _draw_walls(self) -> None:
         ox, oy = self._grid_origin()
         walls = self._state.get_walls()
         for (wx, wy) in walls:
-            rect = pygame.Rect(ox + wx * CELL_SIZE_PX + 1, oy + wy * CELL_SIZE_PX + 1,
-                               CELL_SIZE_PX - 1, CELL_SIZE_PX - 1)
+            rect = pygame.Rect(
+                ox + wx * self._cell_size + 1,
+                oy + wy * self._cell_size + 1,
+                self._cell_size - 1,
+                self._cell_size - 1,
+            )
             pygame.draw.rect(self._screen, COL_WALL, rect)
 
     def _draw_listener(self) -> None:
@@ -168,9 +207,17 @@ class RenderEngine:
         if lp is None:
             return
         cx, cy = self._grid_to_pixel_center(*lp)
-        pygame.draw.circle(self._screen, COL_LISTENER, (cx, cy), CELL_SIZE_PX // 2 - 2)
+        radius = max(2, self._cell_size // 2 - 2)
+        pygame.draw.circle(self._screen, COL_LISTENER, (cx, cy), radius)
+
         # Forward-axis indicator (small line pointing +x)
-        pygame.draw.line(self._screen, (200, 220, 255), (cx, cy), (cx + CELL_SIZE_PX // 2 + 2, cy), 2)
+        pygame.draw.line(
+            self._screen,
+            (200, 220, 255),
+            (cx, cy),
+            (cx + self._cell_size // 2 + 2, cy),
+            2,
+        )
         label = self._font_sm.render("L", True, (255, 255, 255))
         self._screen.blit(label, (cx - label.get_width() // 2, cy - label.get_height() // 2))
 
@@ -179,7 +226,8 @@ class RenderEngine:
         for sid, info in sources.items():
             px, py = self._grid_to_pixel_center(*info["pos"])
             col = COL_SOURCE_SEL if sid == self._selected_source_id else COL_SOURCE
-            pygame.draw.circle(self._screen, col, (px, py), CELL_SIZE_PX // 2 - 2)
+            radius = max(2, self._cell_size // 2 - 2)
+            pygame.draw.circle(self._screen, col, (px, py), radius)
             label = self._font_sm.render(f"S{sid}", True, (0, 0, 0))
             self._screen.blit(label, (px - label.get_width() // 2, py - label.get_height() // 2))
 
@@ -187,7 +235,8 @@ class RenderEngine:
     # Left sidebar
     # ------------------------------------------------------------------
     def _draw_left_sidebar(self) -> None:
-        sidebar_rect = pygame.Rect(0, 0, LEFT_SIDEBAR_W, WINDOW_H)
+        win_h = self._screen.get_height()
+        sidebar_rect = pygame.Rect(0, 0, LEFT_SIDEBAR_W, win_h)
         pygame.draw.rect(self._screen, COL_SIDEBAR_BG, sidebar_rect)
 
         y = 12
@@ -251,6 +300,19 @@ class RenderEngine:
                 self._screen.blit(ll, (self._loop_toggle_rect.x + 10, self._loop_toggle_rect.y + 5))
                 y += 38
 
+                # Pause/Play button (only drawn when audio_path is set)
+                if ap:
+                    playing = src.get("playing", False)
+                    self._pause_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
+                    pause_col = COL_BUTTON_ACT if playing else COL_BUTTON
+                    pygame.draw.rect(self._screen, pause_col, self._pause_btn_rect, border_radius=6)
+                    pause_label = "⏸ Pause" if playing else "▶ Play"
+                    pl = self._font.render(pause_label, True, COL_TEXT)
+                    self._screen.blit(pl, (self._pause_btn_rect.x + 10, self._pause_btn_rect.y + 5))
+                    y += 38
+                else:
+                    self._pause_btn_rect = None
+
                 # Playing indicator
                 playing = src.get("playing", False)
                 status_col = (80, 220, 80) if playing else (180, 60, 60)
@@ -259,51 +321,83 @@ class RenderEngine:
                 self._screen.blit(st, (16, y)); y += 24
             else:
                 self._selected_source_id = None
+                self._load_audio_btn_rect = None
+                self._loop_toggle_rect = None
+                self._pause_btn_rect = None
         else:
             self._load_audio_btn_rect = None
             self._loop_toggle_rect = None
+            self._pause_btn_rect = None
 
     # ------------------------------------------------------------------
     # Right sidebar — waveform graphs
     # ------------------------------------------------------------------
     def _draw_right_sidebar(self) -> None:
-        rx = LEFT_SIDEBAR_W + GRID_W
-        sidebar_rect = pygame.Rect(rx, 0, RIGHT_SIDEBAR_W, WINDOW_H)
+        grid_draw_w = GRID_COLS * self._cell_size
+        rx = LEFT_SIDEBAR_W + grid_draw_w
+        win_w, win_h = self._screen.get_size()
+        right_sidebar_w = max(RIGHT_SIDEBAR_W, win_w - rx)
+        sidebar_rect = pygame.Rect(rx, 0, right_sidebar_w, win_h)
         pygame.draw.rect(self._screen, COL_SIDEBAR_BG, sidebar_rect)
 
         y = 12
         title = self._font_lg.render("WAVEFORMS", True, COL_TEXT)
         self._screen.blit(title, (rx + 12, y)); y += 28
 
-        sources = self._state.get_sources()
-        graph_w = RIGHT_SIDEBAR_W - 24
+        graph_w = right_sidebar_w - 24
         graph_h = 50
 
+        # ---- FIX 3: FINAL OUTPUT (what you hear) graph at top ----
+        mix_data = self._audio.get_last_mix()
+        if mix_data is not None and mix_data.ndim == 2:
+            mix_data = mix_data[:, 0]  # left channel
+
+        mix_rect = pygame.Rect(rx + 12, y + 16, graph_w, graph_h)
+        pygame.draw.rect(self._screen, COL_GRAPH_BG, mix_rect, border_radius=3)
+        pygame.draw.rect(self._screen, (100, 180, 255), mix_rect, width=1, border_radius=3)
+        mix_peak = self._draw_waveform(mix_rect, mix_data, (120, 220, 255), PROCESSED_DISPLAY_MULTIPLIER)
+
+        mix_label_str = f"FINAL OUTPUT (L)  peak: {mix_peak:.4f}"
+        mix_label = self._font_sm.render(mix_label_str, True, (150, 220, 255))
+        self._screen.blit(mix_label, (rx + 12, y))
+        y += graph_h + 24
+
+        # Separator line
+        pygame.draw.line(self._screen, COL_GRID_LINE, (rx + 12, y), (rx + right_sidebar_w - 12, y))
+        y += 12
+
+        # ---- Per-source graphs ----
+        sources = self._state.get_sources()
         for sid in sorted(sources.keys()):
-            if y + graph_h * 2 + 50 > WINDOW_H:
+            if y + graph_h * 2 + 50 > win_h:
                 break  # no room for more
 
             label = self._font_sm.render(f"Source {sid}", True, COL_SOURCE)
             self._screen.blit(label, (rx + 12, y)); y += 18
 
             # --- Raw waveform graph ---
-            raw_label = self._font_sm.render("raw", True, COL_TEXT_DIM)
-            self._screen.blit(raw_label, (rx + 12, y))
             raw_rect = pygame.Rect(rx + 12, y + 14, graph_w, graph_h)
             pygame.draw.rect(self._screen, COL_GRAPH_BG, raw_rect, border_radius=3)
             raw_data = self._audio.get_last_raw(sid)
-            self._draw_waveform(raw_rect, raw_data, COL_GRAPH_RAW)
+            raw_peak = self._draw_waveform(raw_rect, raw_data, COL_GRAPH_RAW, RAW_DISPLAY_MULTIPLIER)
+
+            raw_label_str = f"raw  peak: {raw_peak:.4f}"
+            raw_label = self._font_sm.render(raw_label_str, True, COL_TEXT_DIM)
+            self._screen.blit(raw_label, (rx + 12, y))
             y += graph_h + 18
 
             # --- Processed waveform graph (left channel) ---
-            proc_label = self._font_sm.render("processed (L)", True, COL_TEXT_DIM)
-            self._screen.blit(proc_label, (rx + 12, y))
-            proc_rect = pygame.Rect(rx + 12, y + 14, graph_w, graph_h)
-            pygame.draw.rect(self._screen, COL_GRAPH_BG, proc_rect, border_radius=3)
             proc_data = self._audio.get_last_processed(sid)
             if proc_data is not None and proc_data.ndim == 2:
                 proc_data = proc_data[:, 0]  # left channel only
-            self._draw_waveform(proc_rect, proc_data, COL_GRAPH_PROC)
+
+            proc_rect = pygame.Rect(rx + 12, y + 14, graph_w, graph_h)
+            pygame.draw.rect(self._screen, COL_GRAPH_BG, proc_rect, border_radius=3)
+            proc_peak = self._draw_waveform(proc_rect, proc_data, COL_GRAPH_PROC, PROCESSED_DISPLAY_MULTIPLIER)
+
+            proc_label_str = f"processed (L)  peak: {proc_peak:.4f}"
+            proc_label = self._font_sm.render(proc_label_str, True, COL_TEXT_DIM)
+            self._screen.blit(proc_label, (rx + 12, y))
             y += graph_h + 22
 
     def _draw_waveform(
@@ -311,26 +405,37 @@ class RenderEngine:
         rect: pygame.Rect,
         data: Optional[np.ndarray],
         color: tuple[int, int, int],
-    ) -> None:
-        """Render a simple line-plot waveform inside *rect*."""
+        multiplier: float = 1.0,
+    ) -> float:
+        """Render a simple line-plot waveform inside *rect* using viz_engine.
+
+        Returns the actual pre-scaling peak amplitude computed by viz_engine.
+        """
         if data is None or len(data) == 0:
-            return
+            return 0.0
 
         w = rect.width
         h = rect.height
-        n = len(data)
-        step = max(1, n // w)
-        # Downsample to fit width
+
+        # Downsample for target width using viz_engine
+        ds = downsample_for_width(data, w)
+        norm_data, peak = compute_display_samples(ds, multiplier)
+
+        if len(norm_data) == 0:
+            return peak
+
+        n = len(norm_data)
         points: list[tuple[int, int]] = []
-        for i in range(0, min(n, w * step), step):
-            x = rect.x + int(i / step)
-            # Map sample value [-1, 1] to pixel y
-            val = float(np.clip(data[i], -1.0, 1.0))
+        for i in range(n):
+            x = rect.x + (int(i * w / max(1, n - 1)) if n > 1 else 0)
+            val = float(norm_data[i])
             y = rect.y + int((1.0 - val) * 0.5 * h)
             points.append((x, y))
 
         if len(points) > 1:
             pygame.draw.lines(self._screen, color, False, points, 1)
+
+        return peak
 
     # ------------------------------------------------------------------
     # Draw the dragged item ghost
@@ -339,10 +444,11 @@ class RenderEngine:
         if self._dragging is None:
             return
         mx, my = self._drag_mouse_pos
+        radius = max(2, self._cell_size // 2 - 2)
         if self._dragging == "listener":
-            pygame.draw.circle(self._screen, (*COL_LISTENER, 160), (mx, my), CELL_SIZE_PX // 2 - 2)
+            pygame.draw.circle(self._screen, (*COL_LISTENER, 160), (mx, my), radius)
         elif self._dragging == "source":
-            pygame.draw.circle(self._screen, (*COL_SOURCE, 160), (mx, my), CELL_SIZE_PX // 2 - 2)
+            pygame.draw.circle(self._screen, (*COL_SOURCE, 160), (mx, my), radius)
 
     # ------------------------------------------------------------------
     # Event handling
@@ -352,6 +458,10 @@ class RenderEngine:
             if event.type == pygame.QUIT:
                 self._running = False
                 return
+
+            elif event.type == pygame.VIDEORESIZE:
+                self._screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
+                self._update_layout()
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 self._on_mouse_down(event.pos)
@@ -398,6 +508,15 @@ class RenderEngine:
                 src = self._state.get_source(self._selected_source_id)
                 if src:
                     self._state.set_source_loop(self._selected_source_id, not src["loop"])
+                return
+            # Pause / Play toggle
+            if (self._selected_source_id is not None
+                    and hasattr(self, '_pause_btn_rect')
+                    and self._pause_btn_rect is not None
+                    and self._pause_btn_rect.collidepoint(mx, my)):
+                src = self._state.get_source(self._selected_source_id)
+                if src and src.get("audio_path"):
+                    self._state.set_source_playing(self._selected_source_id, not src.get("playing", False))
                 return
             return
 

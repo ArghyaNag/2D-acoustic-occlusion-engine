@@ -61,6 +61,14 @@ class LiveInputStream:
         # The actual index into _buffer is  _write_pos % _buf_len.
         self._write_pos: int = 0
 
+        # Monotonically increasing read position (total samples read).
+        # The actual index into _buffer is  _read_pos % _buf_len.
+        self._read_pos: int = 0
+
+        # Safety/pre-rolling threshold to handle jitter/latency (2 blocks = 2048 samples)
+        self._safety_threshold: int = 2048
+        self._pre_rolling: bool = True
+
         self._stream: Optional[sd.InputStream] = None
         self._active: bool = False
 
@@ -94,10 +102,11 @@ class LiveInputStream:
     # Reader API (called from the *output* callback — also real-time)
     # ------------------------------------------------------------------
     def read_recent(self, num_frames: int) -> np.ndarray:
-        """Return the *num_frames* most recently written samples.
+        """Read continuous samples from the ring buffer.
 
-        If fewer than *num_frames* have been written since start (underrun),
-        the leading portion of the returned array is zero-filled.
+        Maintains an internal read pointer to avoid repeating or skipping
+        samples. Handles overrun and underrun with zero padding and safety
+        pre-rolling.
 
         Returns
         -------
@@ -106,31 +115,48 @@ class LiveInputStream:
         """
         out = np.zeros(num_frames, dtype=np.float32)
 
-        pos = self._write_pos  # snapshot (atomic read on CPython)
-        if pos == 0:
-            return out  # nothing captured yet
+        write_pos = self._write_pos  # snapshot (atomic read on CPython)
+        read_pos = self._read_pos
 
-        # How many samples are actually available in the ring buffer?
-        available = min(pos, self._buf_len)
-        # How many of those do we need?
+        # 1. Overrun check: Has the write pointer wrapped and overtaken our read pointer?
+        if write_pos - read_pos > self._buf_len - num_frames:
+            # Skip read pointer forward to catch up, leaving safety margin.
+            read_pos = max(0, write_pos - self._safety_threshold)
+            self._pre_rolling = True
+
+        # 2. Check pre-rolling: Wait until we accumulate a safety cushion.
+        if self._pre_rolling:
+            if write_pos - read_pos >= self._safety_threshold:
+                self._pre_rolling = False
+            else:
+                # Still pre-rolling, return silence (zeros).
+                self._read_pos = read_pos
+                return out
+
+        # 3. Read up to num_frames samples.
+        available = write_pos - read_pos
+        if available <= 0:
+            # Complete underrun.
+            self._pre_rolling = True
+            return out
+
         to_read = min(num_frames, available)
-
-        # End index in the ring buffer (most recent sample is at pos-1).
-        end_idx = pos % self._buf_len
-        start_idx = (end_idx - to_read) % self._buf_len
-
-        # Destination offset — right-align the data, zeros on the left.
-        dst_offset = num_frames - to_read
+        start_idx = read_pos % self._buf_len
+        end_idx = (read_pos + to_read) % self._buf_len
 
         if start_idx < end_idx:
-            # Contiguous region
-            out[dst_offset:] = self._buffer[start_idx:end_idx]
+            out[:to_read] = self._buffer[start_idx:end_idx]
         else:
-            # Wraps around the buffer boundary
             first_part = self._buf_len - start_idx
-            out[dst_offset : dst_offset + first_part] = self._buffer[start_idx:]
-            out[dst_offset + first_part :] = self._buffer[:end_idx]
+            out[:first_part] = self._buffer[start_idx:]
+            out[first_part:to_read] = self._buffer[:end_idx]
 
+        # 4. If we had an underrun, trigger pre-rolling to rebuild safety cushion.
+        if to_read < num_frames:
+            self._pre_rolling = True
+
+        # Advance persistent read position.
+        self._read_pos = read_pos + to_read
         return out
 
     # ------------------------------------------------------------------
@@ -140,6 +166,10 @@ class LiveInputStream:
         """Open the default mic and start capturing."""
         if self._active:
             return
+        # Reset positions and state on start
+        self._write_pos = 0
+        self._read_pos = 0
+        self._pre_rolling = True
         try:
             self._stream = sd.InputStream(
                 samplerate=self._sample_rate,

@@ -22,6 +22,7 @@ import sounddevice as sd
 import soundfile as sf
 
 import dsp_engine
+from live_input import LiveInputStream
 from shared_state import SharedState
 
 
@@ -59,6 +60,9 @@ class AudioEngine:
         self._last_mix: Optional[np.ndarray] = None
 
         self._stream: Optional[sd.OutputStream] = None
+
+        # --- Live mic input (for "mic" mode sources) ---
+        self._live_input = LiveInputStream(sample_rate=self.SAMPLE_RATE)
 
     # ------------------------------------------------------------------
     # Audio file loading (called from the main / UI thread)
@@ -141,43 +145,49 @@ class AudioEngine:
                 if not src_info["playing"]:
                     continue
 
-                # ---- Fetch the pre-loaded buffer & cursor ----
-                # We access _audio_buffers / _cursors without the lock
-                # inside the callback to avoid blocking.  Writes from the
-                # main thread are infrequent and atomic-enough on CPython.
-                buf = self._audio_buffers.get(sid)
-                if buf is None:
-                    continue
+                # ---- Determine input mode and fetch audio chunk ----
+                input_mode = src_info.get("input_mode", "file")
 
-                cursor = self._cursors.get(sid, 0)
-                buf_len = len(buf)
-
-                # ---- Slice the next `frames` samples ----
-                if src_info["loop"]:
-                    # Looping: wrap around
-                    chunk = np.empty(frames, dtype=np.float32)
-                    remaining = frames
-                    write_pos = 0
-                    c = cursor
-                    while remaining > 0:
-                        available = min(remaining, buf_len - c)
-                        chunk[write_pos : write_pos + available] = buf[c : c + available]
-                        write_pos += available
-                        remaining -= available
-                        c = (c + available) % buf_len
-                    self._cursors[sid] = c
+                if input_mode == "mic":
+                    # Pull the most recent `frames` samples from the
+                    # live mic ring buffer.  If the mic hasn't produced
+                    # enough data yet, read_recent returns zero-padded.
+                    chunk = self._live_input.read_recent(frames)
                 else:
-                    # Non-looping: read what's available, zero-pad the rest
-                    available = min(frames, buf_len - cursor)
-                    if available <= 0:
-                        # Source exhausted — mark not-playing
-                        # (safe to write to shared_state from here because
-                        #  set_source_playing just grabs the lock briefly)
-                        self._shared_state.set_source_playing(sid, False)
+                    # ---- FILE mode: existing pre-loaded buffer path ----
+                    buf = self._audio_buffers.get(sid)
+                    if buf is None:
                         continue
-                    chunk = np.zeros(frames, dtype=np.float32)
-                    chunk[:available] = buf[cursor : cursor + available]
-                    self._cursors[sid] = cursor + available
+
+                    cursor = self._cursors.get(sid, 0)
+                    buf_len = len(buf)
+
+                    # ---- Slice the next `frames` samples ----
+                    if src_info["loop"]:
+                        # Looping: wrap around
+                        chunk = np.empty(frames, dtype=np.float32)
+                        remaining = frames
+                        write_pos = 0
+                        c = cursor
+                        while remaining > 0:
+                            available = min(remaining, buf_len - c)
+                            chunk[write_pos : write_pos + available] = buf[c : c + available]
+                            write_pos += available
+                            remaining -= available
+                            c = (c + available) % buf_len
+                        self._cursors[sid] = c
+                    else:
+                        # Non-looping: read what's available, zero-pad the rest
+                        available = min(frames, buf_len - cursor)
+                        if available <= 0:
+                            # Source exhausted — mark not-playing
+                            # (safe to write to shared_state from here because
+                            #  set_source_playing just grabs the lock briefly)
+                            self._shared_state.set_source_playing(sid, False)
+                            continue
+                        chunk = np.zeros(frames, dtype=np.float32)
+                        chunk[:available] = buf[cursor : cursor + available]
+                        self._cursors[sid] = cursor + available
 
                 # ---- Store raw chunk for visualisation ----
                 self._last_raw[sid] = chunk.copy()
@@ -212,7 +222,8 @@ class AudioEngine:
     # Stream lifecycle
     # ------------------------------------------------------------------
     def start(self) -> None:
-        """Open and start the audio output stream."""
+        """Open and start the audio output stream (and mic input stream)."""
+        self._live_input.start()
         self._stream = sd.OutputStream(
             samplerate=self.SAMPLE_RATE,
             blocksize=self.BLOCKSIZE,  # TUNE: adjust for latency
@@ -223,8 +234,9 @@ class AudioEngine:
         self._stream.start()
 
     def stop(self) -> None:
-        """Stop and close the audio output stream."""
+        """Stop and close the audio output stream (and mic input stream)."""
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+        self._live_input.stop()

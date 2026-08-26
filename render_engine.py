@@ -137,6 +137,7 @@ class RenderEngine:
         self._load_audio_btn_rect: Optional[pygame.Rect] = None
         self._loop_toggle_rect: Optional[pygame.Rect] = None
         self._pause_btn_rect: Optional[pygame.Rect] = None
+        self._input_mode_btn_rect: Optional[pygame.Rect] = None
 
     def _update_layout(self) -> None:
         """Recompute dynamic cell size based on current window dimensions."""
@@ -277,31 +278,50 @@ class RenderEngine:
                 header = self._font_lg.render(f"Source {self._selected_source_id}", True, COL_SOURCE_SEL)
                 self._screen.blit(header, (16, y)); y += 24
 
-                # File name
-                ap = src.get("audio_path")
-                fname = os.path.basename(ap) if ap else "No file"
-                ft = self._font_sm.render(fname, True, COL_TEXT_DIM)
-                self._screen.blit(ft, (16, y)); y += 20
+                input_mode = src.get("input_mode", "file")
+                is_mic = (input_mode == "mic")
 
-                # Load audio button
-                self._load_audio_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 30)
-                pygame.draw.rect(self._screen, COL_BUTTON, self._load_audio_btn_rect, border_radius=6)
-                la = self._font.render("Load Audio File", True, COL_TEXT)
-                self._screen.blit(la, (self._load_audio_btn_rect.x + 10, self._load_audio_btn_rect.y + 6))
-                y += 40
-
-                # Loop toggle
-                loop_on = src.get("loop", False)
-                self._loop_toggle_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
-                loop_col = COL_BUTTON_ACT if loop_on else COL_BUTTON
-                pygame.draw.rect(self._screen, loop_col, self._loop_toggle_rect, border_radius=6)
-                loop_label = "Loop: ON" if loop_on else "Loop: OFF"
-                ll = self._font.render(loop_label, True, COL_TEXT)
-                self._screen.blit(ll, (self._loop_toggle_rect.x + 10, self._loop_toggle_rect.y + 5))
+                # Input mode toggle button
+                self._input_mode_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
+                mode_col = COL_BUTTON_ACT if is_mic else COL_BUTTON
+                pygame.draw.rect(self._screen, mode_col, self._input_mode_btn_rect, border_radius=6)
+                mode_label = "Input: Mic" if is_mic else "Input: File"
+                ml = self._font.render(mode_label, True, COL_TEXT)
+                self._screen.blit(ml, (self._input_mode_btn_rect.x + 10, self._input_mode_btn_rect.y + 5))
                 y += 38
 
-                # Pause/Play button (only drawn when audio_path is set)
-                if ap:
+                if not is_mic:
+                    # File name
+                    ap = src.get("audio_path")
+                    fname = os.path.basename(ap) if ap else "No file"
+                    ft = self._font_sm.render(fname, True, COL_TEXT_DIM)
+                    self._screen.blit(ft, (16, y)); y += 20
+
+                    # Load audio button
+                    self._load_audio_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 30)
+                    pygame.draw.rect(self._screen, COL_BUTTON, self._load_audio_btn_rect, border_radius=6)
+                    la = self._font.render("Load Audio File", True, COL_TEXT)
+                    self._screen.blit(la, (self._load_audio_btn_rect.x + 10, self._load_audio_btn_rect.y + 6))
+                    y += 40
+
+                    # Loop toggle
+                    loop_on = src.get("loop", False)
+                    self._loop_toggle_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
+                    loop_col = COL_BUTTON_ACT if loop_on else COL_BUTTON
+                    pygame.draw.rect(self._screen, loop_col, self._loop_toggle_rect, border_radius=6)
+                    loop_label = "Loop: ON" if loop_on else "Loop: OFF"
+                    ll = self._font.render(loop_label, True, COL_TEXT)
+                    self._screen.blit(ll, (self._loop_toggle_rect.x + 10, self._loop_toggle_rect.y + 5))
+                    y += 38
+                else:
+                    ap = src.get("audio_path")
+                    self._load_audio_btn_rect = None
+                    self._loop_toggle_rect = None
+
+                # Pause/Play button — visible for mic-mode (always) and
+                # file-mode when audio_path is set.
+                show_pause = is_mic or src.get("audio_path")
+                if show_pause:
                     playing = src.get("playing", False)
                     self._pause_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
                     pause_col = COL_BUTTON_ACT if playing else COL_BUTTON
@@ -324,10 +344,12 @@ class RenderEngine:
                 self._load_audio_btn_rect = None
                 self._loop_toggle_rect = None
                 self._pause_btn_rect = None
+                self._input_mode_btn_rect = None
         else:
             self._load_audio_btn_rect = None
             self._loop_toggle_rect = None
             self._pause_btn_rect = None
+            self._input_mode_btn_rect = None
 
     # ------------------------------------------------------------------
     # Right sidebar — waveform graphs
@@ -490,7 +512,7 @@ class RenderEngine:
             if hasattr(self, '_wall_btn_rect') and self._wall_btn_rect.collidepoint(mx, my):
                 self._wall_tool = (self._wall_tool + 1) % 3
                 return
-            # Load audio button
+            # Load audio button (only clickable in file mode)
             if (self._selected_source_id is not None
                     and hasattr(self, '_load_audio_btn_rect')
                     and self._load_audio_btn_rect is not None
@@ -500,7 +522,7 @@ class RenderEngine:
                     self._audio.load_audio_for_source(self._selected_source_id, path)
                     self._state.set_source_audio(self._selected_source_id, path)
                 return
-            # Loop toggle
+            # Loop toggle (only clickable in file mode)
             if (self._selected_source_id is not None
                     and hasattr(self, '_loop_toggle_rect')
                     and self._loop_toggle_rect is not None
@@ -509,14 +531,37 @@ class RenderEngine:
                 if src:
                     self._state.set_source_loop(self._selected_source_id, not src["loop"])
                 return
+            # Input mode toggle
+            if (self._selected_source_id is not None
+                    and hasattr(self, '_input_mode_btn_rect')
+                    and self._input_mode_btn_rect is not None
+                    and self._input_mode_btn_rect.collidepoint(mx, my)):
+                src = self._state.get_source(self._selected_source_id)
+                if src:
+                    cur = src.get("input_mode", "file")
+                    new_mode = "mic" if cur == "file" else "file"
+                    self._state.set_source_input_mode(self._selected_source_id, new_mode)
+                    # When switching to mic, auto-play so user hears output
+                    # immediately.  When switching to file, keep current
+                    # playing state.
+                    if new_mode == "mic":
+                        self._state.set_source_playing(self._selected_source_id, True)
+                return
             # Pause / Play toggle
             if (self._selected_source_id is not None
                     and hasattr(self, '_pause_btn_rect')
                     and self._pause_btn_rect is not None
                     and self._pause_btn_rect.collidepoint(mx, my)):
                 src = self._state.get_source(self._selected_source_id)
-                if src and src.get("audio_path"):
-                    self._state.set_source_playing(self._selected_source_id, not src.get("playing", False))
+                if src:
+                    # For mic mode, always allow toggling; for file mode,
+                    # only when an audio file is loaded.
+                    is_mic = src.get("input_mode", "file") == "mic"
+                    if is_mic or src.get("audio_path"):
+                        self._state.set_source_playing(
+                            self._selected_source_id,
+                            not src.get("playing", False),
+                        )
                 return
             return
 

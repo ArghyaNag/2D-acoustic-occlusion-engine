@@ -30,6 +30,7 @@ CELL_SIZE_PX: int = 24
 #       "audio_path": str | None,
 #       "loop": bool,
 #       "playing": bool,
+#       "input_mode": "file" | "mic",
 #   }
 
 
@@ -83,6 +84,7 @@ class SharedState:
                 "audio_path": None,
                 "loop": True,
                 "playing": False,
+                "input_mode": "file",
             }
             return sid
 
@@ -106,6 +108,12 @@ class SharedState:
         with self._lock:
             if source_id in self._sources:
                 self._sources[source_id]["playing"] = playing
+
+    def set_source_input_mode(self, source_id: int, mode: str) -> None:
+        """Set the input mode for *source_id* to 'file' or 'mic'."""
+        with self._lock:
+            if source_id in self._sources:
+                self._sources[source_id]["input_mode"] = mode
 
     def remove_source(self, source_id: int) -> None:
         with self._lock:

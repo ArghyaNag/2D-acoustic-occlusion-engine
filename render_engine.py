@@ -280,65 +280,94 @@ class RenderEngine:
 
                 input_mode = src.get("input_mode", "file")
                 is_mic = (input_mode == "mic")
+                is_network = (input_mode == "network")
 
-                # Input mode toggle button
-                self._input_mode_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
-                mode_col = COL_BUTTON_ACT if is_mic else COL_BUTTON
-                pygame.draw.rect(self._screen, mode_col, self._input_mode_btn_rect, border_radius=6)
-                mode_label = "Input: Mic" if is_mic else "Input: File"
-                ml = self._font.render(mode_label, True, COL_TEXT)
-                self._screen.blit(ml, (self._input_mode_btn_rect.x + 10, self._input_mode_btn_rect.y + 5))
-                y += 38
-
-                if not is_mic:
-                    # File name
-                    ap = src.get("audio_path")
-                    fname = os.path.basename(ap) if ap else "No file"
-                    ft = self._font_sm.render(fname, True, COL_TEXT_DIM)
-                    self._screen.blit(ft, (16, y)); y += 20
-
-                    # Load audio button
-                    self._load_audio_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 30)
-                    pygame.draw.rect(self._screen, COL_BUTTON, self._load_audio_btn_rect, border_radius=6)
-                    la = self._font.render("Load Audio File", True, COL_TEXT)
-                    self._screen.blit(la, (self._load_audio_btn_rect.x + 10, self._load_audio_btn_rect.y + 6))
-                    y += 40
-
-                    # Loop toggle
-                    loop_on = src.get("loop", False)
-                    self._loop_toggle_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
-                    loop_col = COL_BUTTON_ACT if loop_on else COL_BUTTON
-                    pygame.draw.rect(self._screen, loop_col, self._loop_toggle_rect, border_radius=6)
-                    loop_label = "Loop: ON" if loop_on else "Loop: OFF"
-                    ll = self._font.render(loop_label, True, COL_TEXT)
-                    self._screen.blit(ll, (self._loop_toggle_rect.x + 10, self._loop_toggle_rect.y + 5))
+                if is_network:
+                    # Network sources are auto-managed — show read-only label,
+                    # hide all manual controls.
+                    net_label_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
+                    pygame.draw.rect(self._screen, (40, 80, 60), net_label_rect, border_radius=6)
+                    net_client = src.get("network_client")
+                    if net_client:
+                        nl_text = f"Net: {net_client[0]}:{net_client[1]}"
+                    else:
+                        nl_text = "Input: Network (auto)"
+                    nl = self._font.render(nl_text, True, COL_TEXT)
+                    self._screen.blit(nl, (net_label_rect.x + 10, net_label_rect.y + 5))
                     y += 38
-                else:
-                    ap = src.get("audio_path")
+
+                    # Playing indicator (always playing for network sources)
+                    playing = src.get("playing", False)
+                    status_col = (80, 220, 80) if playing else (180, 60, 60)
+                    status_text = "▶ Playing" if playing else "■ Stopped"
+                    st = self._font.render(status_text, True, status_col)
+                    self._screen.blit(st, (16, y)); y += 24
+
+                    # No other controls for network sources.
+                    self._input_mode_btn_rect = None
                     self._load_audio_btn_rect = None
                     self._loop_toggle_rect = None
-
-                # Pause/Play button — visible for mic-mode (always) and
-                # file-mode when audio_path is set.
-                show_pause = is_mic or src.get("audio_path")
-                if show_pause:
-                    playing = src.get("playing", False)
-                    self._pause_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
-                    pause_col = COL_BUTTON_ACT if playing else COL_BUTTON
-                    pygame.draw.rect(self._screen, pause_col, self._pause_btn_rect, border_radius=6)
-                    pause_label = "⏸ Pause" if playing else "▶ Play"
-                    pl = self._font.render(pause_label, True, COL_TEXT)
-                    self._screen.blit(pl, (self._pause_btn_rect.x + 10, self._pause_btn_rect.y + 5))
-                    y += 38
-                else:
                     self._pause_btn_rect = None
+                else:
+                    # Input mode toggle button (file ↔ mic only)
+                    self._input_mode_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
+                    mode_col = COL_BUTTON_ACT if is_mic else COL_BUTTON
+                    pygame.draw.rect(self._screen, mode_col, self._input_mode_btn_rect, border_radius=6)
+                    mode_label = "Input: Mic" if is_mic else "Input: File"
+                    ml = self._font.render(mode_label, True, COL_TEXT)
+                    self._screen.blit(ml, (self._input_mode_btn_rect.x + 10, self._input_mode_btn_rect.y + 5))
+                    y += 38
 
-                # Playing indicator
-                playing = src.get("playing", False)
-                status_col = (80, 220, 80) if playing else (180, 60, 60)
-                status_text = "▶ Playing" if playing else "■ Stopped"
-                st = self._font.render(status_text, True, status_col)
-                self._screen.blit(st, (16, y)); y += 24
+                if not is_network:
+                    if not is_mic:
+                        # File name
+                        ap = src.get("audio_path")
+                        fname = os.path.basename(ap) if ap else "No file"
+                        ft = self._font_sm.render(fname, True, COL_TEXT_DIM)
+                        self._screen.blit(ft, (16, y)); y += 20
+
+                        # Load audio button
+                        self._load_audio_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 30)
+                        pygame.draw.rect(self._screen, COL_BUTTON, self._load_audio_btn_rect, border_radius=6)
+                        la = self._font.render("Load Audio File", True, COL_TEXT)
+                        self._screen.blit(la, (self._load_audio_btn_rect.x + 10, self._load_audio_btn_rect.y + 6))
+                        y += 40
+
+                        # Loop toggle
+                        loop_on = src.get("loop", False)
+                        self._loop_toggle_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
+                        loop_col = COL_BUTTON_ACT if loop_on else COL_BUTTON
+                        pygame.draw.rect(self._screen, loop_col, self._loop_toggle_rect, border_radius=6)
+                        loop_label = "Loop: ON" if loop_on else "Loop: OFF"
+                        ll = self._font.render(loop_label, True, COL_TEXT)
+                        self._screen.blit(ll, (self._loop_toggle_rect.x + 10, self._loop_toggle_rect.y + 5))
+                        y += 38
+                    else:
+                        ap = src.get("audio_path")
+                        self._load_audio_btn_rect = None
+                        self._loop_toggle_rect = None
+
+                    # Pause/Play button — visible for mic-mode (always) and
+                    # file-mode when audio_path is set.
+                    show_pause = is_mic or src.get("audio_path")
+                    if show_pause:
+                        playing = src.get("playing", False)
+                        self._pause_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
+                        pause_col = COL_BUTTON_ACT if playing else COL_BUTTON
+                        pygame.draw.rect(self._screen, pause_col, self._pause_btn_rect, border_radius=6)
+                        pause_label = "⏸ Pause" if playing else "▶ Play"
+                        pl = self._font.render(pause_label, True, COL_TEXT)
+                        self._screen.blit(pl, (self._pause_btn_rect.x + 10, self._pause_btn_rect.y + 5))
+                        y += 38
+                    else:
+                        self._pause_btn_rect = None
+
+                    # Playing indicator
+                    playing = src.get("playing", False)
+                    status_col = (80, 220, 80) if playing else (180, 60, 60)
+                    status_text = "▶ Playing" if playing else "■ Stopped"
+                    st = self._font.render(status_text, True, status_col)
+                    self._screen.blit(st, (16, y)); y += 24
             else:
                 self._selected_source_id = None
                 self._load_audio_btn_rect = None
@@ -635,12 +664,70 @@ class RenderEngine:
     # ------------------------------------------------------------------
     # Main render loop
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Network source auto-management
+    # ------------------------------------------------------------------
+    def _sync_network_sources(self) -> None:
+        """Synchronise network sources with active UDP clients.
+
+        Called once per frame from the main render loop.  Spawns new
+        grid sources for newly-connected clients and removes sources
+        for clients that have timed out.
+        """
+        active_clients = self._audio.network_input.get_active_clients()
+        sources = self._state.get_sources()
+
+        # Build map: network_client -> source_id for existing network sources.
+        client_to_sid: dict[tuple[str, int], int] = {}
+        for sid, info in sources.items():
+            if info.get("input_mode") == "network":
+                net_client = info.get("network_client")
+                if net_client is not None:
+                    client_to_sid[tuple(net_client)] = sid
+
+        active_set = set(active_clients)
+
+        # --- Spawn sources for new clients ---
+        listener_pos = self._state.get_listener_pos()
+        base_x = (listener_pos[0] + 2) if listener_pos else 5
+        base_y = (listener_pos[1]) if listener_pos else 5
+        network_source_count = len(client_to_sid)
+
+        for client_key in active_clients:
+            if client_key not in client_to_sid:
+                # Stagger spawn positions based on total network sources
+                offset = network_source_count * 2
+                spawn_x = min(base_x + offset, GRID_COLS - 1)
+                spawn_y = min(base_y + offset, GRID_ROWS - 1)
+
+                sid = self._state.add_source((spawn_x, spawn_y))
+                self._state.set_source_input_mode(sid, "network")
+                self._state.set_source_network_client(sid, client_key)
+                self._state.set_source_playing(sid, True)
+
+                client_to_sid[client_key] = sid
+                network_source_count += 1
+
+        # --- Remove sources for disconnected clients ---
+        for client_key, sid in client_to_sid.items():
+            if client_key not in active_set:
+                self._state.remove_source(sid)
+                self._audio.remove_source(sid)
+                if self._selected_source_id == sid:
+                    self._selected_source_id = None
+
+    # ------------------------------------------------------------------
+    # Main render loop
+    # ------------------------------------------------------------------
     def run(self) -> None:
         """Run the Pygame render loop at ~60 FPS until the window is closed."""
         while self._running:
             self._handle_events()
             if not self._running:
                 break
+
+            # Sync network sources before drawing.
+            self._sync_network_sources()
 
             self._screen.fill(COL_BG)
             self._draw_grid()

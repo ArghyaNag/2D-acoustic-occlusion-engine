@@ -23,6 +23,7 @@ import soundfile as sf
 
 import dsp_engine
 from live_input import LiveInputStream
+from network_input import NetworkInputServer
 from shared_state import SharedState
 
 
@@ -63,6 +64,9 @@ class AudioEngine:
 
         # --- Live mic input (for "mic" mode sources) ---
         self._live_input = LiveInputStream(sample_rate=self.SAMPLE_RATE)
+
+        # --- Network input (for "network" mode sources) ---
+        self._network_input = NetworkInputServer(sample_rate=self.SAMPLE_RATE)
 
     # ------------------------------------------------------------------
     # Audio file loading (called from the main / UI thread)
@@ -153,6 +157,12 @@ class AudioEngine:
                     # live mic ring buffer.  If the mic hasn't produced
                     # enough data yet, read_recent returns zero-padded.
                     chunk = self._live_input.read_recent(frames)
+                elif input_mode == "network":
+                    # Pull from the network client's ring buffer.
+                    net_client = src_info.get("network_client")
+                    if net_client is None:
+                        continue
+                    chunk = self._network_input.read_recent(net_client, frames)
                 else:
                     # ---- FILE mode: existing pre-loaded buffer path ----
                     buf = self._audio_buffers.get(sid)
@@ -221,9 +231,15 @@ class AudioEngine:
     # ------------------------------------------------------------------
     # Stream lifecycle
     # ------------------------------------------------------------------
+    @property
+    def network_input(self) -> NetworkInputServer:
+        """Expose the network input server for main-thread access."""
+        return self._network_input
+
     def start(self) -> None:
-        """Open and start the audio output stream (and mic input stream)."""
+        """Open and start the audio output stream (and mic/network input)."""
         self._live_input.start()
+        self._network_input.start()
         self._stream = sd.OutputStream(
             samplerate=self.SAMPLE_RATE,
             blocksize=self.BLOCKSIZE,  # TUNE: adjust for latency
@@ -234,9 +250,10 @@ class AudioEngine:
         self._stream.start()
 
     def stop(self) -> None:
-        """Stop and close the audio output stream (and mic input stream)."""
+        """Stop and close the audio output stream (and mic/network input)."""
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
             self._stream = None
         self._live_input.stop()
+        self._network_input.stop()

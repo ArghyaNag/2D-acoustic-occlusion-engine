@@ -30,7 +30,8 @@ CELL_SIZE_PX: int = 24
 #       "audio_path": str | None,
 #       "loop": bool,
 #       "playing": bool,
-#       "input_mode": "file" | "mic",
+#       "input_mode": "file" | "mic" | "network",
+#       "network_client": (ip, port) | None,
 #   }
 
 
@@ -85,6 +86,7 @@ class SharedState:
                 "loop": True,
                 "playing": False,
                 "input_mode": "file",
+                "network_client": None,
             }
             return sid
 
@@ -110,10 +112,18 @@ class SharedState:
                 self._sources[source_id]["playing"] = playing
 
     def set_source_input_mode(self, source_id: int, mode: str) -> None:
-        """Set the input mode for *source_id* to 'file' or 'mic'."""
+        """Set the input mode for *source_id* to 'file', 'mic', or 'network'."""
         with self._lock:
             if source_id in self._sources:
                 self._sources[source_id]["input_mode"] = mode
+
+    def set_source_network_client(
+        self, source_id: int, client_key: tuple[str, int] | None
+    ) -> None:
+        """Associate *source_id* with a network client (ip, port) tuple."""
+        with self._lock:
+            if source_id in self._sources:
+                self._sources[source_id]["network_client"] = client_key
 
     def remove_source(self, source_id: int) -> None:
         with self._lock:

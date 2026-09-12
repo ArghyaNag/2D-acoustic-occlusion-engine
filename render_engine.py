@@ -24,6 +24,7 @@ import pygame
 
 from shared_state import SharedState, GRID_COLS, GRID_ROWS, CELL_SIZE_PX
 from audio_engine import AudioEngine
+from pathfinding import find_k_paths
 from viz_engine import (
     compute_display_samples,
     compute_spectrum,
@@ -62,6 +63,8 @@ COL_GRAPH_PROC  = (100, 160, 255)
 COL_GRAPH_SPECTRUM = (255, 180, 80)
 COL_PALETTE_LISTENER = (55, 100, 200)
 COL_PALETTE_SOURCE   = (200, 120, 30)
+COL_PATH_PRIMARY     = (50, 200, 180)
+COL_PATH_REFLECTED   = (200, 100, 220)
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +236,63 @@ class RenderEngine:
             pygame.draw.circle(self._screen, col, (px, py), radius)
             label = self._font_sm.render(f"S{sid}", True, (0, 0, 0))
             self._screen.blit(label, (px - label.get_width() // 2, py - label.get_height() // 2))
+
+    # ------------------------------------------------------------------
+    # Path visualization (drawn BEFORE listener/source circles)
+    # ------------------------------------------------------------------
+    def _draw_source_paths(self) -> None:
+        """Draw pathfinding routes from each source to the listener on the grid.
+
+        Calls find_k_paths independently on the render thread (safe — pathfinding
+        is pure and stateless).  This duplicates the computation already done on
+        the audio thread inside process_block, which is intentional: sharing
+        results across threads would violate this project's shared_state
+        architecture.  A single k=2 pathfinding call is <1ms on a 40x24 grid,
+        so even several sources at 60fps is negligible.
+        """
+        listener_pos = self._state.get_listener_pos()
+        if listener_pos is None:
+            return
+
+        sources = self._state.get_sources()
+        walls = self._state.get_walls()
+
+        for sid in sorted(sources.keys()):
+            source_pos = sources[sid]["pos"]
+            paths = find_k_paths(
+                listener_pos, source_pos, walls, GRID_COLS, GRID_ROWS, k=2,
+            )
+            if not paths:
+                continue  # Total occlusion — no path to draw.
+
+            # --- Primary path: solid teal line ---
+            primary_cells = paths[0].cells
+            if len(primary_cells) >= 2:
+                points = [
+                    self._grid_to_pixel_center(*cell)
+                    for cell in primary_cells
+                ]
+                pygame.draw.lines(
+                    self._screen, COL_PATH_PRIMARY, False, points, 2,
+                )
+
+            # --- Reflected path: dotted magenta line ---
+            if len(paths) >= 2:
+                reflected_cells = paths[1].cells
+                if len(reflected_cells) >= 2:
+                    points = [
+                        self._grid_to_pixel_center(*cell)
+                        for cell in reflected_cells
+                    ]
+                    # Draw every other segment to create a dashed/dotted effect.
+                    for i in range(0, len(points) - 1, 2):
+                        pygame.draw.line(
+                            self._screen,
+                            COL_PATH_REFLECTED,
+                            points[i],
+                            points[i + 1],
+                            2,
+                        )
 
     # ------------------------------------------------------------------
     # Left sidebar
@@ -759,6 +819,7 @@ class RenderEngine:
             self._screen.fill(COL_BG)
             self._draw_grid()
             self._draw_walls()
+            self._draw_source_paths()
             self._draw_listener()
             self._draw_sources()
             self._draw_left_sidebar()

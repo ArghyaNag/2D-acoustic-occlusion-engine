@@ -222,8 +222,8 @@ class AudioEngine:
                 active_count += 1
 
         # ---- Soft-clip to prevent distortion when sources overlap ----
-        if active_count > 1:
-            mix = np.tanh(mix)
+        # if active_count > 1:
+        mix = np.tanh(mix)
 
         self._last_mix = mix.copy()
         outdata[:] = mix

@@ -453,10 +453,18 @@ def process_block(
         # the reflected arrival's panning.
         cells = ref_path.cells
         if len(cells) >= 2:
-            dx_ref = float(cells[-1][0] - cells[-2][0])
+            # Use the segment(s) LEAVING the listener, not arriving at the source —
+            # panning represents how the listener perceives arrival direction.
+            # Average over a short run to avoid single-step jitter from grid
+            # discretization changing frame to frame.
+            lookahead = min(4, len(cells) - 1)
+            dx_ref = float(cells[lookahead][0] - cells[0][0])
+            ref_scale = float(lookahead)
         else:
-            dx_ref = 0.0  # degenerate path -> center pan
-        ref_pan = np.clip(dx_ref / max_offset, -1.0, 1.0)
+            dx_ref = 0.0
+            ref_scale = 1.0
+        ref_pan = np.clip(dx_ref / max(1.0, ref_scale), -1.0, 1.0)        
+        
         ref_right = 0.5 * (1.0 + ref_pan)
         ref_left = 0.5 * (1.0 - ref_pan)
 

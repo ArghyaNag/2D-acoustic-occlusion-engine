@@ -240,6 +240,34 @@ class RenderEngine:
     # ------------------------------------------------------------------
     # Path visualization (drawn BEFORE listener/source circles)
     # ------------------------------------------------------------------
+    def _draw_dashed_polyline(self, points, color, width=2, dash_len=6.0, gap_len=4.0):
+        if len(points) < 2:
+            return
+        dash_on = True
+        remaining = dash_len
+        for (x0, y0), (x1, y1) in zip(points[:-1], points[1:]):
+            seg_dx, seg_dy = x1 - x0, y1 - y0
+            seg_len = (seg_dx ** 2 + seg_dy ** 2) ** 0.5
+            if seg_len == 0:
+                continue
+            travelled = 0.0
+            while travelled < seg_len:
+                step = min(remaining, seg_len - travelled)
+                t0, t1 = travelled / seg_len, (travelled + step) / seg_len
+                if dash_on:
+                    pygame.draw.line(
+                        self._screen, color,
+                        (x0 + seg_dx * t0, y0 + seg_dy * t0),
+                        (x0 + seg_dx * t1, y0 + seg_dy * t1),
+                        width,
+                    )
+                travelled += step
+                remaining -= step
+                if remaining <= 0:
+                    dash_on = not dash_on
+                    remaining = dash_len if dash_on else gap_len   
+   
+   
     def _draw_source_paths(self) -> None:
         """Draw pathfinding routes from each source to the listener on the grid.
 
@@ -285,14 +313,15 @@ class RenderEngine:
                         for cell in reflected_cells
                     ]
                     # Draw every other segment to create a dashed/dotted effect.
-                    for i in range(0, len(points) - 1, 2):
-                        pygame.draw.line(
-                            self._screen,
-                            COL_PATH_REFLECTED,
-                            points[i],
-                            points[i + 1],
-                            2,
-                        )
+                    # for i in range(0, len(points) - 1, 2):
+                    #     pygame.draw.line(
+                    #         self._screen,
+                    #         COL_PATH_REFLECTED,
+                    #         points[i],
+                    #         points[i + 1],
+                    #         2,
+                    #     )
+                    self._draw_dashed_polyline(points, COL_PATH_REFLECTED)
 
     # ------------------------------------------------------------------
     # Left sidebar
@@ -688,7 +717,8 @@ class RenderEngine:
 
         # Wall painting
         if self._wall_tool == WALL_DRAW:
-            self._state.add_wall(cell)
+            if not self._cell_occupied_by_entity(cell):
+                self._state.add_wall(cell)
             self._wall_painting = True
             return
         elif self._wall_tool == WALL_ERASE:
@@ -716,6 +746,12 @@ class RenderEngine:
         # Click on empty cell → deselect
         self._selected_source_id = None
 
+    def _cell_occupied_by_entity(self, cell: tuple[int, int]) -> bool:
+        """True if the listener or any source currently sits at *cell*."""
+        if self._state.get_listener_pos() == cell:
+            return True
+        return any(info["pos"] == cell for info in self._state.get_sources().values())
+
     def _on_mouse_up(self, pos: tuple[int, int]) -> None:
         mx, my = pos
 
@@ -724,7 +760,7 @@ class RenderEngine:
 
         if self._dragging is not None:
             cell = self._pixel_to_grid(mx, my)
-            if cell is not None:
+            if cell is not None and not self._state.has_wall(cell):
                 if self._dragging == "listener":
                     self._state.set_listener_pos(cell)
                 elif self._dragging == "source":
@@ -732,7 +768,8 @@ class RenderEngine:
                     self._selected_source_id = sid
                 elif self._dragging == "move_source" and self._dragging_source_id is not None:
                     self._state.move_source(self._dragging_source_id, cell)
-
+            # else: drop rejected silently — item snaps back (nothing to reset,
+            # since state was never mutated during the drag itself)
             self._dragging = None
             self._dragging_source_id = None
 
@@ -744,7 +781,9 @@ class RenderEngine:
             cell = self._pixel_to_grid(*pos)
             if cell is not None:
                 if self._wall_tool == WALL_DRAW:
-                    self._state.add_wall(cell)
+                    if not self._cell_occupied_by_entity(cell):
+                        self._state.add_wall(cell)
+
                 elif self._wall_tool == WALL_ERASE:
                     self._state.remove_wall(cell)
 

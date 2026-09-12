@@ -26,6 +26,7 @@ from shared_state import SharedState, GRID_COLS, GRID_ROWS, CELL_SIZE_PX
 from audio_engine import AudioEngine
 from viz_engine import (
     compute_display_samples,
+    compute_spectrum,
     downsample_for_width,
     RAW_DISPLAY_MULTIPLIER,
     PROCESSED_DISPLAY_MULTIPLIER,
@@ -58,6 +59,7 @@ COL_BUTTON_ACT  = (80, 100, 180)
 COL_GRAPH_BG    = (20, 20, 28)
 COL_GRAPH_RAW   = (100, 200, 100)
 COL_GRAPH_PROC  = (100, 160, 255)
+COL_GRAPH_SPECTRUM = (255, 180, 80)
 COL_PALETTE_LISTENER = (55, 100, 200)
 COL_PALETTE_SOURCE   = (200, 120, 30)
 
@@ -420,8 +422,8 @@ class RenderEngine:
         # ---- Per-source graphs ----
         sources = self._state.get_sources()
         for sid in sorted(sources.keys()):
-            if y + graph_h * 2 + 50 > win_h:
-                break  # no room for more
+            if y + graph_h * 3 + 68 > win_h:
+                break  # no room for more (raw + processed + spectrum)
 
             label = self._font_sm.render(f"Source {sid}", True, COL_SOURCE)
             self._screen.blit(label, (rx + 12, y)); y += 18
@@ -449,6 +451,31 @@ class RenderEngine:
             proc_label_str = f"processed (L)  peak: {proc_peak:.4f}"
             proc_label = self._font_sm.render(proc_label_str, True, COL_TEXT_DIM)
             self._screen.blit(proc_label, (rx + 12, y))
+            y += graph_h + 18
+
+            # --- Spectrum bar-graph panel ---
+            spec_label = self._font_sm.render("spectrum", True, COL_TEXT_DIM)
+            self._screen.blit(spec_label, (rx + 12, y))
+            spec_rect = pygame.Rect(rx + 12, y + 14, graph_w, graph_h)
+            pygame.draw.rect(self._screen, COL_GRAPH_BG, spec_rect, border_radius=3)
+
+            bin_centers, magnitudes = compute_spectrum(
+                proc_data, self._audio.SAMPLE_RATE, num_bins=32,
+            )
+            if len(magnitudes) > 0:
+                num_bars = len(magnitudes)
+                bar_w = max(1, spec_rect.width // num_bars)
+                for bi in range(num_bars):
+                    mag = float(min(1.0, max(0.0, magnitudes[bi])))
+                    bar_h = int(mag * spec_rect.height)
+                    bar_x = spec_rect.x + bi * bar_w
+                    bar_y = spec_rect.y + spec_rect.height - bar_h
+                    if bar_h > 0:
+                        pygame.draw.rect(
+                            self._screen,
+                            COL_GRAPH_SPECTRUM,
+                            (bar_x, bar_y, max(1, bar_w - 1), bar_h),
+                        )
             y += graph_h + 22
 
     def _draw_waveform(

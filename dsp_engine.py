@@ -108,9 +108,15 @@ def process_block(input_block: np.ndarray, listener_pos: tuple[float, float], so
         primary_mono = _fft_lowpass(primary_mono, primary_cutoff, sample_rate)
     primary_gain = 1.0 / (1.0 + 0.15 * primary_path.length)
     primary_mono *= primary_gain
-    dx = source_pos[0] - listener_pos[0]
-    max_offset = 20.0
-    pan = np.clip(dx / max_offset, -1.0, 1.0)
+    primary_cells = primary_path.cells
+    if len(primary_cells) >= 2:
+        lookahead = min(4, len(primary_cells) - 1)
+        dx_primary = float(primary_cells[lookahead][0] - primary_cells[0][0])
+        primary_scale = float(lookahead)
+    else:
+        dx_primary = 0.0
+        primary_scale = 1.0
+    pan = np.clip(dx_primary / max(1.0, primary_scale), -1.0, 1.0)
     primary_right = 0.5 * (1.0 + pan)
     primary_left = 0.5 * (1.0 - pan)
     out = np.empty((n_frames, 2), dtype=np.float32)

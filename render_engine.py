@@ -22,7 +22,10 @@ from typing import Optional
 import numpy as np
 import pygame
 
-from shared_state import SharedState, GRID_COLS, GRID_ROWS, CELL_SIZE_PX
+from shared_state import (
+    SharedState, GRID_COLS, GRID_ROWS, CELL_SIZE_PX,
+    WALL_GAIN_HARD, WALL_GAIN_MEDIUM, WALL_GAIN_SOFT,
+)
 from audio_engine import AudioEngine
 from pathfinding import find_k_paths
 from viz_engine import (
@@ -65,6 +68,19 @@ COL_PALETTE_LISTENER = (55, 100, 200)
 COL_PALETTE_SOURCE   = (200, 120, 30)
 COL_PATH_PRIMARY     = (50, 200, 180)
 COL_PATH_REFLECTED   = (200, 100, 220)
+
+# ---------------------------------------------------------------------------
+# Wall material definitions (gain, display color, label)
+# ---------------------------------------------------------------------------
+_WALL_MATERIALS: list[dict] = [
+    {"gain": WALL_GAIN_HARD,   "color": (160, 165, 175), "label": "Hard  (Concrete)"},
+    {"gain": WALL_GAIN_MEDIUM, "color": (185, 155, 110), "label": "Med   (Wood)"},
+    {"gain": WALL_GAIN_SOFT,   "color": ( 80, 155, 145), "label": "Soft  (Curtain)"},
+]
+# Map gain -> swatch color for fast lookup in _draw_walls()
+_GAIN_TO_COLOR: dict[float, tuple[int, int, int]] = {
+    m["gain"]: m["color"] for m in _WALL_MATERIALS
+}
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +152,8 @@ class RenderEngine:
         self._drag_mouse_pos: tuple[int, int] = (0, 0)
         self._wall_tool: int = WALL_OFF
         self._wall_painting: bool = False  # True while mouse is held for wall drawing
+        self._wall_material: float = WALL_GAIN_MEDIUM  # currently selected material gain
+        self._mat_swatch_rects: list[pygame.Rect] = []  # populated in _draw_left_sidebar
         self._selected_source_id: Optional[int] = None
 
         # Control rects
@@ -198,15 +216,18 @@ class RenderEngine:
 
     def _draw_walls(self) -> None:
         ox, oy = self._grid_origin()
-        walls = self._state.get_walls()
-        for (wx, wy) in walls:
+        wall_gains = self._state.get_wall_gains()  # {pos: gain}
+        for (wx, wy), gain in wall_gains.items():
+            # Map the stored gain to its swatch color; fall back to the
+            # neutral COL_WALL if the gain value is somehow unrecognised.
+            color = _GAIN_TO_COLOR.get(gain, COL_WALL)
             rect = pygame.Rect(
                 ox + wx * self._cell_size + 1,
                 oy + wy * self._cell_size + 1,
                 self._cell_size - 1,
                 self._cell_size - 1,
             )
-            pygame.draw.rect(self._screen, COL_WALL, rect)
+            pygame.draw.rect(self._screen, color, rect)
 
     def _draw_listener(self) -> None:
         lp = self._state.get_listener_pos()
@@ -356,7 +377,30 @@ class RenderEngine:
         pygame.draw.rect(self._screen, btn_col, self._wall_btn_rect, border_radius=6)
         wt = self._font.render(WALL_LABELS[self._wall_tool], True, COL_TEXT)
         self._screen.blit(wt, (self._wall_btn_rect.x + 10, self._wall_btn_rect.y + 7))
-        y += 48
+        y += 42
+
+        # ---- Material swatches (only visible in DRAW mode) ----
+        self._mat_swatch_rects = []
+        if self._wall_tool == WALL_DRAW:
+            swatch_label = self._font_sm.render("Material:", True, COL_TEXT_DIM)
+            self._screen.blit(swatch_label, (16, y))
+            y += 16
+            swatch_w = (LEFT_SIDEBAR_W - 32)
+            swatch_h = 26
+            for mat in _WALL_MATERIALS:
+                rect = pygame.Rect(16, y, swatch_w, swatch_h)
+                self._mat_swatch_rects.append(rect)
+                # Highlight if this material is selected
+                is_selected = (mat["gain"] == self._wall_material)
+                border_col = (255, 255, 255) if is_selected else (80, 80, 95)
+                pygame.draw.rect(self._screen, mat["color"], rect, border_radius=5)
+                pygame.draw.rect(self._screen, border_col, rect, width=2, border_radius=5)
+                lbl = self._font_sm.render(mat["label"], True, (20, 20, 20))
+                self._screen.blit(lbl, (rect.x + 7, rect.y + 5))
+                y += swatch_h + 4
+            y += 6  # small gap below swatches
+        else:
+            y += 6  # same gap so layout below is stable
 
         # ---- Separator ----
         pygame.draw.line(self._screen, COL_GRID_LINE, (16, y), (LEFT_SIDEBAR_W - 16, y))
@@ -657,6 +701,11 @@ class RenderEngine:
             if hasattr(self, '_wall_btn_rect') and self._wall_btn_rect.collidepoint(mx, my):
                 self._wall_tool = (self._wall_tool + 1) % 3
                 return
+            # Material swatch selection (only active in DRAW mode)
+            for i, rect in enumerate(self._mat_swatch_rects):
+                if rect.collidepoint(mx, my):
+                    self._wall_material = _WALL_MATERIALS[i]["gain"]
+                    return
             # Load audio button (only clickable in file mode)
             if (self._selected_source_id is not None
                     and hasattr(self, '_load_audio_btn_rect')
@@ -717,8 +766,8 @@ class RenderEngine:
 
         # Wall painting
         if self._wall_tool == WALL_DRAW:
-            if not self._cell_occupied_by_entity(cell):
-                self._state.add_wall(cell)
+            if not self._cell_occupied_by_entity(cell):  # preserve occupancy check
+                self._state.add_wall(cell, gain=self._wall_material)
             self._wall_painting = True
             return
         elif self._wall_tool == WALL_ERASE:
@@ -781,8 +830,8 @@ class RenderEngine:
             cell = self._pixel_to_grid(*pos)
             if cell is not None:
                 if self._wall_tool == WALL_DRAW:
-                    if not self._cell_occupied_by_entity(cell):
-                        self._state.add_wall(cell)
+                    if not self._cell_occupied_by_entity(cell):  # preserve occupancy check
+                        self._state.add_wall(cell, gain=self._wall_material)
 
                 elif self._wall_tool == WALL_ERASE:
                     self._state.remove_wall(cell)

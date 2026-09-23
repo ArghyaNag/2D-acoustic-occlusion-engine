@@ -82,7 +82,7 @@ from __future__ import annotations
 import numpy as np
 
 from pathfinding import find_k_paths
-from shared_state import GRID_COLS, GRID_ROWS
+from shared_state import GRID_COLS, GRID_ROWS, WALL_GAIN_MEDIUM
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +114,12 @@ _SAMPLES_PER_GRID_UNIT: int = 40
 # _MAX_DELAY_SAMPLES: upper bound on the reflection delay to cap buffer
 # memory in pathological mazes.  8000 samples ~ 181 ms at 44100 Hz.
 _MAX_DELAY_SAMPLES: int = 8000
+
+# Default reflectivity gain used when no matching wall cell is found next to a
+# corner (should not occur in a well-formed reflected path, but guards against
+# edge cases).  Matches WALL_GAIN_MEDIUM so behaviour is consistent with the
+# material system's neutral setting.
+_DEFAULT_MATERIAL_GAIN: float = WALL_GAIN_MEDIUM
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +171,33 @@ def _corner_cutoff_hz(corners: int) -> float:
     Returns a value in Hz, clamped to [_MIN_CUTOFF_HZ, _BASE_CUTOFF_HZ].
     """
     return max(_MIN_CUTOFF_HZ, _BASE_CUTOFF_HZ - corners * _CUTOFF_DROP_PER_CORNER_HZ)
+
+
+# 8 neighbour offsets used for the wall-proximity search at each corner cell.
+_NEIGHBOUR_OFFSETS: tuple[tuple[int, int], ...] = (
+    ( 0, -1), ( 0,  1), (-1,  0), ( 1,  0),
+    (-1, -1), ( 1, -1), (-1,  1), ( 1,  1),
+)
+
+
+def _corner_material_gain(
+    corner_cell: tuple[int, int],
+    wall_gains: dict[tuple[int, int], float],
+) -> float:
+    """Return the reflectivity gain for the wall adjacent to *corner_cell*.
+
+    Searches the 8 immediate neighbours of *corner_cell* for a wall entry
+    in *wall_gains*.  Returns the gain of the first neighbour found, or
+    _DEFAULT_MATERIAL_GAIN as a safe fallback if none is present (this
+    should not occur in a properly constructed reflected path, but we
+    never crash).
+    """
+    cx, cy = corner_cell
+    for dx, dy in _NEIGHBOUR_OFFSETS:
+        gain = wall_gains.get((cx + dx, cy + dy))
+        if gain is not None:
+            return gain
+    return _DEFAULT_MATERIAL_GAIN
 
 
 def _primary_cutoff_hz(
@@ -315,6 +348,7 @@ def process_block(
     walls: set[tuple[int, int]] | frozenset[tuple[int, int]],
     sample_rate: int,
     filter_state: dict,               # persistent per-source state, mutated in-place
+    wall_gains: dict[tuple[int, int], float] | None = None,  # pos -> gain for DSP
 ) -> np.ndarray:                      # (n_frames, 2) stereo float32
     """Transform a mono source block into a stereo output block.
 
@@ -341,12 +375,23 @@ def process_block(
         These keys are created automatically on first call where a
         reflected arrival exists.  Callers should continue passing the
         same dict instance across calls as before.
+    wall_gains : dict or None
+        Optional mapping of wall positions to their reflectivity gain
+        scalars, as produced by SharedState.get_snapshot()["wall_gains"].
+        When provided, the reflected arrival's amplitude is multiplied by
+        the product of each corner cell's adjacent-wall gain.  Defaults
+        to ``None`` (treated as empty dict), which falls back to
+        ``_DEFAULT_MATERIAL_GAIN`` per corner and is backward-compatible
+        with existing tests that don't pass this argument.
 
     Returns
     -------
     np.ndarray
         Stereo float32 output, shape ``(n_frames, 2)``.
     """
+    if wall_gains is None:
+        wall_gains = {}
+
     n_frames = input_block.shape[0]
     mono = input_block.astype(np.float32, copy=True)
 
@@ -435,6 +480,47 @@ def process_block(
         # -- Distance gain ------------------------------------------------
         ref_gain_val = 1.0 / (1.0 + 0.15 * ref_path.length)
         ref_mono = ref_mono * ref_gain_val  # new array (avoids aliasing mono)
+
+        # -- Material gain (per-corner reflectivity) ----------------------
+        # Identify the corner cells of the reflected path using the same
+        # direction-change logic as pathfinding._count_corners, so the set
+        # of corner cells is identical to what produced ref_path.corners.
+        #
+        # Corner identification (mirrors pathfinding._count_corners exactly):
+        #   prev direction = cells[1] - cells[0]
+        #   for i in range(2, len(cells)):
+        #       if direction(cells[i]-cells[i-1]) != prev: corner at cells[i-1]
+        #
+        # This guarantees: len(corner_cells) == ref_path.corners.
+        cells = ref_path.cells
+        ref_material_gain: float = 1.0
+        if len(cells) >= 3 and wall_gains:
+            prev_dx = cells[1][0] - cells[0][0]
+            prev_dy = cells[1][1] - cells[0][1]
+            corner_count_check: int = 0
+            for i in range(2, len(cells)):
+                dx = cells[i][0] - cells[i - 1][0]
+                dy = cells[i][1] - cells[i - 1][1]
+                if dx != prev_dx or dy != prev_dy:
+                    # cells[i-1] is the corner cell — look up adjacent wall
+                    ref_material_gain *= _corner_material_gain(cells[i - 1], wall_gains)
+                    corner_count_check += 1
+                prev_dx = dx
+                prev_dy = dy
+            # Assertion (debug-mode only): our loop counts must agree with
+            # ref_path.corners as computed by pathfinding._count_corners.
+            # Both use identical direction-change logic so they must match.
+            assert corner_count_check == ref_path.corners, (
+                f"Corner count mismatch: loop counted {corner_count_check}, "
+                f"ref_path.corners={ref_path.corners}"
+            )
+        elif len(cells) >= 3:
+            # wall_gains is empty (backward-compat / tests): apply the
+            # default material gain for each corner so tests still reflect
+            # the material system semantics consistently.
+            ref_material_gain = _DEFAULT_MATERIAL_GAIN ** ref_path.corners
+
+        ref_mono = ref_mono * ref_material_gain
 
         # -- Delay --------------------------------------------------------
         delay_samples = int(round(

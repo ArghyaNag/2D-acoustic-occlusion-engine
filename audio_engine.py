@@ -139,6 +139,7 @@ class AudioEngine:
         listener_pos = snapshot["listener_pos"]
         sources = snapshot["sources"]
         walls = snapshot["walls"]
+        wall_gains = snapshot.get("wall_gains", {})  # pos -> reflectivity gain
 
         # Start with silence
         mix = np.zeros((frames, 2), dtype=np.float32)
@@ -213,6 +214,7 @@ class AudioEngine:
                     walls=walls,
                     sample_rate=self.SAMPLE_RATE,
                     filter_state=fstate,
+                    wall_gains=wall_gains,
                 )
 
                 # ---- Store processed chunk for visualisation ----

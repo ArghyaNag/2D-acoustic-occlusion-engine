@@ -22,6 +22,15 @@ GRID_ROWS: int = 24
 CELL_SIZE_PX: int = 24
 
 # ---------------------------------------------------------------------------
+# Wall material reflectivity-gain constants
+# These are the per-corner amplitude multipliers applied to reflected paths.
+# ---------------------------------------------------------------------------
+WALL_GAIN_HARD: float   = 0.90  # Concrete / Brick — high reflectivity
+WALL_GAIN_MEDIUM: float = 0.60  # Wood / Plaster  — moderate reflectivity
+WALL_GAIN_SOFT: float   = 0.25  # Curtain / Carpet — high absorption
+DEFAULT_WALL_GAIN: float = WALL_GAIN_MEDIUM  # applied when no gain specified
+
+# ---------------------------------------------------------------------------
 # Source record type (plain dict for simplicity in this skeleton)
 # ---------------------------------------------------------------------------
 # Each source is stored as:
@@ -42,7 +51,8 @@ class SharedState:
         self._lock = threading.Lock()
         self._listener_pos: Optional[tuple[int, int]] = None
         self._sources: dict[int, dict] = {}
-        self._walls: set[tuple[int, int]] = set()
+        # Maps each wall cell (col, row) → its reflectivity gain scalar.
+        self._walls: dict[tuple[int, int], float] = {}
         self._next_source_id: int = 1
 
     # ------------------------------------------------------------------
@@ -58,7 +68,11 @@ class SharedState:
             return {
                 "listener_pos": self._listener_pos,
                 "sources": copy.deepcopy(self._sources),
-                "walls": frozenset(self._walls),  # immutable copy
+                # frozenset of positions — pathfinding.py receives this
+                # unchanged; zero changes needed there.
+                "walls": frozenset(self._walls.keys()),
+                # flat dict copy for the DSP thread's per-corner gain lookup
+                "wall_gains": dict(self._walls),
             }
 
     # ------------------------------------------------------------------
@@ -142,17 +156,34 @@ class SharedState:
     # ------------------------------------------------------------------
     # Walls
     # ------------------------------------------------------------------
-    def add_wall(self, pos: tuple[int, int]) -> None:
+    def add_wall(self, pos: tuple[int, int], gain: float = DEFAULT_WALL_GAIN) -> None:
+        """Place a wall at *pos* with the given reflectivity *gain*.
+
+        If a wall already exists at *pos*, its gain is overwritten with
+        the new value (allows re-painting with a different material).
+        """
         with self._lock:
-            self._walls.add(pos)
+            self._walls[pos] = gain
 
     def remove_wall(self, pos: tuple[int, int]) -> None:
+        """Remove the wall at *pos*, silently ignoring missing cells."""
         with self._lock:
-            self._walls.discard(pos)
+            self._walls.pop(pos, None)  # pop avoids KeyError during erase-drag
 
     def get_walls(self) -> set[tuple[int, int]]:
+        """Return a copy of all wall positions (positions only, no gains).
+
+        Callers that only need occupancy/passability (render paths, LoS
+        checks, pathfinding) use this.  Audio-thread callers should read
+        get_snapshot()["wall_gains"] instead.
+        """
         with self._lock:
-            return set(self._walls)
+            return set(self._walls.keys())
+
+    def get_wall_gains(self) -> dict[tuple[int, int], float]:
+        """Return a shallow copy of the full wall→gain mapping (UI thread use)."""
+        with self._lock:
+            return dict(self._walls)
 
     def has_wall(self, pos: tuple[int, int]) -> bool:
         with self._lock:

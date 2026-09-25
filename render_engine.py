@@ -29,7 +29,11 @@ from shared_state import (
     WALL_GAIN_HARD, WALL_GAIN_MEDIUM, WALL_GAIN_SOFT,
 )
 from audio_engine import AudioEngine
-from pathfinding import find_k_paths
+from pathfinding import (
+    find_k_paths,
+    find_reflector_candidates,
+    find_transmission_path,
+)
 from viz_engine import (
     compute_display_samples,
     compute_spectrum,
@@ -68,8 +72,9 @@ COL_GRAPH_PROC  = (100, 160, 255)
 COL_GRAPH_SPECTRUM = (255, 180, 80)
 COL_PALETTE_LISTENER = (55, 100, 200)
 COL_PALETTE_SOURCE   = (200, 120, 30)
-COL_PATH_PRIMARY     = (50, 200, 180)
-COL_PATH_REFLECTED   = (200, 100, 220)
+COL_PATH_PRIMARY      = (50, 200, 180)
+COL_PATH_TRANSMISSION = (255, 140, 0)    # Family B through-wall transmission line
+COL_PATH_ECHO         = (200, 100, 220)  # Family C discrete echo candidate rays & markers
 
 # ---------------------------------------------------------------------------
 # Wall material definitions (gain, display color, label)
@@ -292,14 +297,18 @@ class RenderEngine:
    
    
     def _draw_source_paths(self) -> None:
-        """Draw pathfinding routes from each source to the listener on the grid.
+        """Draw acoustic arrival paths for all three families on the grid.
 
-        Calls find_k_paths independently on the render thread (safe — pathfinding
-        is pure and stateless).  This duplicates the computation already done on
-        the audio thread inside process_block, which is intentional: sharing
-        results across threads would violate this project's shared_state
-        architecture.  A single k=2 pathfinding call is <1ms on a 40x24 grid,
-        so even several sources at 60fps is negligible.
+        For each source, independently calls pathfinding routines on the render
+        thread (safe — pathfinding is pure and stateless):
+          - Family A: find_k_paths (k=1) for the primary routed path (solid teal line)
+          - Family B: find_transmission_path for through-wall transmission (dashed orange line)
+          - Family C: find_reflector_candidates for discrete echoes (thin magenta rays + circle markers)
+
+        This duplicates computation done on the audio thread inside process_block,
+        which is intentional: audio and render threads communicate ONLY via
+        shared_state.py snapshots/getters to keep thread safety guarantees intact.
+        No audio-thread filter_state is read here.
         """
         listener_pos = self._state.get_listener_pos()
         if listener_pos is None:
@@ -307,44 +316,49 @@ class RenderEngine:
 
         sources = self._state.get_sources()
         walls = self._state.get_walls()
+        wall_gains = self._state.get_wall_gains()
+        listener_px = self._grid_to_pixel_center(*listener_pos)
 
         for sid in sorted(sources.keys()):
             source_pos = sources[sid]["pos"]
+            source_px = self._grid_to_pixel_center(*source_pos)
+
+            # --- Family A: Primary routed path (solid teal line) ---
             paths = find_k_paths(
-                listener_pos, source_pos, walls, GRID_COLS, GRID_ROWS, k=2,
+                listener_pos, source_pos, walls, GRID_COLS, GRID_ROWS, k=1,
             )
-            if not paths:
-                continue  # Total occlusion — no path to draw.
-
-            # --- Primary path: solid teal line ---
-            primary_cells = paths[0].cells
-            if len(primary_cells) >= 2:
-                points = [
-                    self._grid_to_pixel_center(*cell)
-                    for cell in primary_cells
-                ]
-                pygame.draw.lines(
-                    self._screen, COL_PATH_PRIMARY, False, points, 2,
-                )
-
-            # --- Reflected path: dotted magenta line ---
-            if len(paths) >= 2:
-                reflected_cells = paths[1].cells
-                if len(reflected_cells) >= 2:
+            if paths:
+                primary_cells = paths[0].cells
+                if len(primary_cells) >= 2:
                     points = [
                         self._grid_to_pixel_center(*cell)
-                        for cell in reflected_cells
+                        for cell in primary_cells
                     ]
-                    # Draw every other segment to create a dashed/dotted effect.
-                    # for i in range(0, len(points) - 1, 2):
-                    #     pygame.draw.line(
-                    #         self._screen,
-                    #         COL_PATH_REFLECTED,
-                    #         points[i],
-                    #         points[i + 1],
-                    #         2,
-                    #     )
-                    self._draw_dashed_polyline(points, COL_PATH_REFLECTED)
+                    pygame.draw.lines(
+                        self._screen, COL_PATH_PRIMARY, False, points, 2,
+                    )
+
+            # --- Family B: Through-wall transmission (dashed orange line) ---
+            transmission_path = find_transmission_path(
+                source_pos, listener_pos, walls, wall_gains, GRID_COLS, GRID_ROWS,
+            )
+            if transmission_path is not None:
+                self._draw_dashed_polyline(
+                    [source_px, listener_px], COL_PATH_TRANSMISSION,
+                )
+
+            # --- Family C: Discrete multi-wall echoes (thin rays + bounce markers) ---
+            reflector_candidates = find_reflector_candidates(
+                source_pos, listener_pos, walls, wall_gains, GRID_COLS, GRID_ROWS,
+            )
+            for cand in reflector_candidates:
+                wall_px = self._grid_to_pixel_center(*cand.wall_cell)
+                pygame.draw.line(
+                    self._screen, COL_PATH_ECHO, source_px, wall_px, 1,
+                )
+                pygame.draw.circle(
+                    self._screen, COL_PATH_ECHO, wall_px, 4,
+                )
 
     # ------------------------------------------------------------------
     # Left sidebar

@@ -7,37 +7,45 @@ and array maths).  Pathfinding is delegated to the project's own
 pathfinding module (pure Python).
 
 It implements the spatial-audio transformation for a single source using
-up to TWO sound arrivals per block:
-  1. PRIMARY ARRIVAL (shortest path): path-aware FFT lowpass filtering
-     (cutoff driven by corner count), path-length-based gain attenuation
+three acoustic arrival families per block:
+  1. FAMILY A -- PRIMARY ARRIVAL (shortest routed path, when one exists):
+     path-aware FFT lowpass filtering (cutoff driven by corner count,
+     bypassed when direct line of sight is clear to prevent grid
+     discretization penalty), path-length-based distance attenuation
      (inverse-distance law), and stereo panning based on the straight-
      line source-to-listener x-offset.
-  2. REFLECTED ARRIVAL (second-shortest path, when one exists): same
-     filtering and gain formulas parameterized by the alternate path's
-     own corner count and length, a delay proportional to the extra path
-     length beyond the primary, and stereo panning based on the final
-     segment direction of the reflected path (representing the direction
-     the reflected sound approaches the source from -- a simplified
-     directional approximation).
+  2. FAMILY B -- THROUGH-WALL TRANSMISSION (direct geometric line):
+     contributes whenever the straight line between source and listener
+     crosses one or more wall cells, regardless of whether a routed path
+     exists around them.  Filtered by an FFT lowpass whose cutoff drops
+     with the number of walls crossed, attenuated by distance and the
+     product of transmission factors for each crossed wall (derived from
+     wall absorption, where harder walls absorb more transmitted energy),
+     and panned along the direct source-to-listener line.
+  3. FAMILY C -- DISCRETE MULTI-WALL ECHOES (up to _MAX_SIMULTANEOUS_ECHOES):
+     single-bounce reflections off nearby wall cells identified by
+     radial line-of-sight searches from the source and listener.  Each
+     echo is filtered with a cutoff driven by wall material absorption,
+     attenuated by round-trip distance and wall reflectivity, delayed
+     via an independent circular delay line based on round-trip travel
+     distance, and panned individually toward its reflecting wall cell.
 
-The two arrivals are independently filtered, gained, delayed, panned,
+The active arrivals are independently filtered, gained, delayed, panned,
 and then summed into the final stereo output.  No additional global
 rescaling is applied after summing -- per-arrival gains already attenuate
-each contribution by distance.  For a single source very close to the
-listener with two nearly-equal-length paths, the summed output could
-theoretically approach ~2x the old single-arrival amplitude; in practice
-the reflected path is always longer and more filtered, so the addition
-is modest.  audio_engine.py's downstream tanh soft-clipper handles
-multi-source mixing, but only activates for multiple SOURCES (not
-multiple arrivals within one source), so extreme single-source levels
-are possible but unlikely in normal gameplay.
+each contribution by distance.  audio_engine.py's downstream tanh soft-clipper
+handles multi-source mixing, but only activates for multiple SOURCES (not
+multiple arrivals within one source).
 
-When no path exists (total occlusion), a small floor gain is applied.
-When only one path exists, only the primary arrival is produced.
+When no routed path exists (total occlusion), Family A produces no output,
+and sound is generated solely by Family B (through-wall transmission) and
+Family C (discrete echoes).  When no transmission or reflector paths exist,
+total occlusion produces silence.
 
-Processing order per arrival:
-  input -> FFT lowpass (corner-driven cutoff) -> distance gain
-  -> [delay, reflected only] -> stereo pan -> sum both -> output
+Processing order per arrival family:
+  Family A: input -> FFT lowpass (corner/LoS cutoff) -> distance gain -> stereo pan -> out
+  Family B: input -> FFT lowpass (wall-count cutoff) -> transmission gain -> stereo pan -> sum
+  Family C: input -> FFT lowpass (material cutoff) -> echo gain -> delay line -> per-wall pan -> sum
 
 FFT filtering approach -- per-block with smooth taper, no overlap:
   Each mono block is transformed with numpy's rfft, multiplied by a
@@ -68,13 +76,17 @@ Tunable constants (all empirical -- adjust by ear, not derived from any
 acoustic model, matching the existing convention in this file where the
 0.08 distance-gain constant and 20.0 max_offset pan constant were also
 documented as empirical / tunable):
-  _TOTAL_OCCLUSION_FLOOR_GAIN  -- gain when no path exists (~-34 dB)
-  _BASE_CUTOFF_HZ              -- lowpass cutoff at 0 corners (direct LoS)
-  _CUTOFF_DROP_PER_CORNER_HZ   -- cutoff reduction per path corner
-  _MIN_CUTOFF_HZ               -- floor cutoff to prevent total HF silence
-  _TRANSITION_BW_HZ            -- raised-cosine rolloff width in the FFT
-  _SAMPLES_PER_GRID_UNIT       -- delay samples per unit of extra path length
-  _MAX_DELAY_SAMPLES           -- maximum delay readback (bounds buffer size)
+  _BASE_CUTOFF_HZ                       -- lowpass cutoff at 0 corners (direct LoS)
+  _CUTOFF_DROP_PER_CORNER_HZ            -- cutoff reduction per path corner
+  _MIN_CUTOFF_HZ                        -- floor cutoff to prevent total HF silence
+  _TRANSMISSION_BASE_CUTOFF_HZ          -- base transmission cutoff for 0 walls
+  _TRANSMISSION_CUTOFF_DROP_PER_WALL_HZ -- cutoff reduction per wall penetrated
+  _MAX_SIMULTANEOUS_ECHOES              -- maximum concurrent echo delay lines (4)
+  _ECHO_BASE_CUTOFF_HZ                  -- base cutoff for discrete echo reflection
+  _ECHO_CUTOFF_MUFFLE_RANGE_HZ          -- cutoff muffle range scaled by absorption
+  _TRANSITION_BW_HZ                     -- raised-cosine rolloff width in the FFT
+  _SAMPLES_PER_GRID_UNIT                -- delay samples per unit of travel distance
+  _MAX_DELAY_SAMPLES                    -- maximum delay readback (bounds buffer size)
 """
 
 from __future__ import annotations
@@ -88,17 +100,12 @@ from pathfinding import (
     ReflectorCandidate,
     find_reflector_candidates, find_transmission_path,
 )
-from shared_state import GRID_COLS, GRID_ROWS, WALL_GAIN_MEDIUM
+from shared_state import GRID_COLS, GRID_ROWS
 
 
 # ---------------------------------------------------------------------------
 # Tunable constants (empirical -- adjust by ear, not from an acoustic model)
 # ---------------------------------------------------------------------------
-
-# Total occlusion: when no path exists between listener and source, apply
-# this floor gain (~-34 dB) to represent minor sound leakage through / around
-# a sealed boundary.  Small non-zero value rather than hard zero.
-_TOTAL_OCCLUSION_FLOOR_GAIN: float = 0.02
 
 # Corner-driven lowpass cutoff parameters (all in Hz).
 # Formula: cutoff = max(_MIN_CUTOFF_HZ,
@@ -121,21 +128,15 @@ _ECHO_CUTOFF_MUFFLE_RANGE_HZ: float = 3000.0
 # Wider = smoother rolloff = shorter impulse response = fewer artifacts.
 _TRANSITION_BW_HZ: float = 500.0
 
-# Reflection delay parameters.
+# Echo delay parameters (Family C).
 # _SAMPLES_PER_GRID_UNIT: at 44100 Hz, 40 samples ~ 0.9 ms per grid unit of
-# extra path length.  This gives roughly 1-2 ms of delay per extra grid unit,
-# producing a small-room echo feel.  Empirical / tunable.
+# extra round-trip distance.  This gives roughly 1-2 ms of delay per extra
+# grid unit, producing a small-room echo feel.  Empirical / tunable.
 _SAMPLES_PER_GRID_UNIT: int = 40
 
-# _MAX_DELAY_SAMPLES: upper bound on the reflection delay to cap buffer
-# memory in pathological mazes.  8000 samples ~ 181 ms at 44100 Hz.
+# _MAX_DELAY_SAMPLES: upper bound on echo delay to cap buffer memory in
+# pathological mazes.  8000 samples ~ 181 ms at 44100 Hz.
 _MAX_DELAY_SAMPLES: int = 8000
-
-# Default reflectivity gain used when no matching wall cell is found next to a
-# corner (should not occur in a well-formed reflected path, but guards against
-# edge cases).  Matches WALL_GAIN_MEDIUM so behaviour is consistent with the
-# material system's neutral setting.
-_DEFAULT_MATERIAL_GAIN: float = WALL_GAIN_MEDIUM
 
 
 # ---------------------------------------------------------------------------
@@ -151,47 +152,6 @@ def _corner_cutoff_hz(corners: int) -> float:
     return max(_MIN_CUTOFF_HZ, _BASE_CUTOFF_HZ - corners * _CUTOFF_DROP_PER_CORNER_HZ)
 
 
-# 8 neighbour offsets used for the wall-proximity search at each corner
-# cell.  ORDER MATTERS: when a corner touches two different-material
-# walls at once, the neighbour earliest in this list wins the tie-break
-# (see _corner_material_gain's docstring).  Currently N/S/W/E before
-# diagonals, so orthogonal neighbours are always checked first.
-_NEIGHBOUR_OFFSETS: tuple[tuple[int, int], ...] = (
-    ( 0, -1), ( 0,  1), (-1,  0), ( 1,  0),
-    (-1, -1), ( 1, -1), (-1,  1), ( 1,  1),
-)
-
-
-def _corner_material_gain(
-    corner_cell: tuple[int, int],
-    wall_gains: dict[tuple[int, int], float],
-) -> float:
-    """Return the reflectivity gain for the wall adjacent to *corner_cell*.
-
-    Searches the 8 immediate neighbours of *corner_cell* for a wall entry
-    in *wall_gains*, in a fixed priority order (N, S, W, E, NW, NE, SW, SE
-    -- see _NEIGHBOUR_OFFSETS).  Returns the gain of the FIRST neighbour
-    found in that order, or _DEFAULT_MATERIAL_GAIN as a safe fallback if
-    none is present.
-
-    KNOWN SIMPLIFICATION: if a corner cell happens to be adjacent to two
-    or more walls of DIFFERENT materials at once, the neighbour earliest
-    in the fixed priority order wins (in practice, this almost always
-    means North wins), regardless of which wall the reflected path is
-    actually turning against geometrically.  This is an intentional,
-    acknowledged trade-off given project time constraints -- a fully
-    correct version would determine the gain from whichever wall cell is
-    on the path's actual turn direction, using ref_path.cells to infer
-    which side the corner bends toward.  Left as a documented limitation
-    rather than implemented, since single-material corners (the common
-    case) are unaffected.
-    """
-    cx, cy = corner_cell
-    for dx, dy in _NEIGHBOUR_OFFSETS:
-        gain = wall_gains.get((cx + dx, cy + dy))
-        if gain is not None:
-            return gain
-    return _DEFAULT_MATERIAL_GAIN
 
 
 def _primary_cutoff_hz(
@@ -366,7 +326,7 @@ def _geometry_cache_is_stale(
     previous block.  Returns True (stale) when any value differs or when
     no cached snapshot exists yet (first call for this source).
 
-    Stage 2B will use the return value to decide whether to re-run
+    process_block() uses the return value to decide whether to re-run
     find_reflector_candidates / find_transmission_path.
     """
     if (
@@ -392,7 +352,7 @@ def _geometry_cache_store_snapshot(
 ) -> None:
     """Record the current geometry inputs so future staleness checks work.
 
-    Called by Stage 2B right after recomputing cached reflector/transmission
+    Called by process_block() right after recomputing cached reflector/transmission
     data, to mark the cache as valid for this combination of positions and
     walls.  Walls are stored as a frozenset for consistent equality checks.
     """
@@ -402,28 +362,27 @@ def _geometry_cache_store_snapshot(
 
 
 # ---------------------------------------------------------------------------
-# Reflection delay line (circular buffer, persistent in filter_state)
+# Delay line (circular buffer, persistent in filter_state)
 # ---------------------------------------------------------------------------
 def _delay_line_process(
     samples: np.ndarray,
     delay_samples: int,
     filter_state: dict,
     n_frames: int,
-    buf_key: str = "reflection_delay_buf",
-    wpos_key: str = "reflection_delay_write_pos",
+    buf_key: str,
+    wpos_key: str,
 ) -> np.ndarray:
-    """Write *samples* into the reflection delay buffer and return the
-    delayed readback.
+    """Write *samples* into the delay buffer and return the delayed readback.
 
     The buffer is a circular (ring) buffer stored in *filter_state* under
-    keys ``"reflection_delay_buf"`` and ``"reflection_delay_write_pos"``
-    (or custom keys specified by *buf_key* and *wpos_key*).
+    keys specified by *buf_key* and *wpos_key* (e.g. ``"echo_delay_buf_0"``
+    and ``"echo_delay_write_pos_0"``).
     It is initialized to zeros on first call, so the first few blocks of
-    reflected output will ramp in from silence as the buffer primes --
+    echo output will ramp in from silence as the buffer primes --
     this is standard delay-line behaviour.
 
     If *delay_samples* changes between calls (e.g. listener / source
-    moved, changing the reflected path length), the new delay is applied
+    moved, changing the reflection path length), the new delay is applied
     immediately.  This may produce a minor discontinuity, which is
     acceptable for this game-audio approximation -- smooth delay-length
     interpolation is not implemented.
@@ -431,7 +390,7 @@ def _delay_line_process(
     Parameters
     ----------
     samples : np.ndarray
-        Filtered / gained reflected-arrival mono block to write in.
+        Filtered / gained mono block to write in.
     delay_samples : int
         Number of samples to delay the readback by.  Clamped externally
         to [0, _MAX_DELAY_SAMPLES] before this function is called.
@@ -487,14 +446,14 @@ def process_block(
 ) -> np.ndarray:                      # (n_frames, 2) stereo float32
     """Transform a mono source block into a stereo output block.
 
-    Produces independently processed arrivals (primary, reflected,
-    through-wall transmission, and discrete echo) whose panned stereo
+    Produces independently processed arrivals across three acoustic families:
+    Family A (primary routed arrival), Family B (through-wall transmission),
+    and Family C (discrete multi-wall echoes).  Their panned stereo
     contributions are summed into the returned output.  Transmission
     contributes whenever the direct source-listener line crosses walls, and
-    up to _MAX_SIMULTANEOUS_ECHOES discrete echo arrivals (Family C)
-    contribute whenever reflector candidates are cached, both independently
-    of whether a routed path exists (present in both open and totally-occluded
-    layouts).
+    up to _MAX_SIMULTANEOUS_ECHOES discrete echo arrivals contribute whenever
+    reflector candidates are cached, both independently of whether a routed path
+    exists (active in both open and totally-occluded layouts).
 
     Parameters
     ----------
@@ -509,22 +468,22 @@ def process_block(
         Audio sample rate in Hz.
     filter_state : dict
         Mutable dict persisted across calls for this source.  Used to
-        store the reflection and echo delay buffer states:
-          - ``"reflection_delay_buf"`` : np.ndarray -- circular buffer
-          - ``"reflection_delay_write_pos"`` : int -- write head position
-          - ``"echo_delay_buf_{i}"`` : np.ndarray -- circular buffer for echo slot i (0..3)
-          - ``"echo_delay_write_pos_{i}"`` : int -- write head position for echo slot i (0..3)
-        These keys are created automatically on first call where a
-        reflected or echo arrival exists.  Callers should continue passing the
-        same dict instance across calls as before.
+        store geometry-cache snapshots and per-echo circular delay buffers:
+          - ``"_geom_cache_source_pos"`` : tuple[float, float] -- cached source position
+          - ``"_geom_cache_listener_pos"`` : tuple[float, float] -- cached listener position
+          - ``"_geom_cache_walls"`` : frozenset -- cached wall cell positions
+          - ``"_geom_cache_reflector_candidates"`` : list[ReflectorCandidate] -- cached reflector candidates
+          - ``"_geom_cache_transmission_path"`` : list[tuple[tuple[int, int], float]] | None -- cached transmission path
+          - ``"echo_delay_buf_{i}"`` : np.ndarray -- circular delay buffer for echo slot i (0.._MAX_SIMULTANEOUS_ECHOES-1)
+          - ``"echo_delay_write_pos_{i}"`` : int -- circular delay write head position for echo slot i (0.._MAX_SIMULTANEOUS_ECHOES-1)
+        These keys are created and maintained automatically. Callers should
+        continue passing the same dict instance across calls for a given source.
     wall_gains : dict or None
         Optional mapping of wall positions to their reflectivity gain
-        scalars, as produced by SharedState.get_snapshot()["wall_gains"].
-        When provided, the reflected arrival's amplitude is multiplied by
-        the product of each corner cell's adjacent-wall gain.  Defaults
-        to ``None`` (treated as empty dict), which falls back to
-        ``_DEFAULT_MATERIAL_GAIN`` per corner and is backward-compatible
-        with existing tests that don't pass this argument.
+        scalars (0.0 to 1.0), as produced by SharedState.get_snapshot()["wall_gains"].
+        Used by Family B to compute transmission attenuation through walls
+        and by Family C to determine reflector echo gain. Defaults to ``None``
+        (treated as empty dict).
 
     Returns
     -------
@@ -560,38 +519,28 @@ def process_block(
             filter_state, source_pos, listener_pos, walls,
         )
 
-    # ---- 1. Find up to 2 shortest paths via pathfinding -----------------
+    # ---- 1. Find shortest path via pathfinding (Family A) ----------------
     paths = find_k_paths(
         start=listener_cell,
         end=source_cell,
         walls=walls,
         grid_cols=GRID_COLS,
         grid_rows=GRID_ROWS,
-        k=2,
+        k=1,
     )
 
     if not paths:
-        # ---- Total occlusion: no path exists ---------------------------
-        mono *= _TOTAL_OCCLUSION_FLOOR_GAIN
+        # ---- Total occlusion: no routed path exists -------------------
+        # Sound in total occlusion is produced solely by Family B
+        # (through-wall transmission) and Family C (discrete echoes).
+        out = np.zeros((n_frames, 2), dtype=np.float32)
 
-        # Flush delay buffer with silence so stale reflected audio doesn't
-        # produce a jarring artifact if a second path reappears later.
-        if "reflection_delay_buf" in filter_state:
-            _delay_line_process(
-                np.zeros(n_frames, dtype=np.float32),
-                0, filter_state, n_frames,
-            )
-
-        # Pan and write baseline floor-gain output.
+        # Straight-line source-to-listener panning for transmission
         dx = source_pos[0] - listener_pos[0]
         max_offset = 20.0
         pan = np.clip(dx / max_offset, -1.0, 1.0)
-        right_gain = 0.5 * (1.0 + pan)
-        left_gain = 0.5 * (1.0 - pan)
-
-        out = np.empty((n_frames, 2), dtype=np.float32)
-        out[:, 0] = mono * left_gain
-        out[:, 1] = mono * right_gain
+        trans_right = 0.5 * (1.0 + pan)
+        trans_left = 0.5 * (1.0 - pan)
 
         # === THROUGH-WALL TRANSMISSION ARRIVAL (Family B) =================
         transmission_path = filter_state.get("_geom_cache_transmission_path")
@@ -602,8 +551,8 @@ def process_block(
             if trans_cutoff < nyquist:
                 trans_mono = _fft_lowpass(trans_mono, trans_cutoff, sample_rate)
             trans_mono *= trans_gain
-            out[:, 0] += trans_mono * left_gain
-            out[:, 1] += trans_mono * right_gain
+            out[:, 0] += trans_mono * trans_left
+            out[:, 1] += trans_mono * trans_right
 
         # === DISCRETE ECHO ARRIVALS (Family C, up to _MAX_SIMULTANEOUS_ECHOES) =
         candidates = filter_state.get("_geom_cache_reflector_candidates") or []
@@ -641,15 +590,9 @@ def process_block(
 
         return out
 
-    # -- At least one path exists -----------------------------------------
+    # -- At least one path exists: Family A (primary arrival) -------------
     primary_path = paths[0]
-    has_reflection = len(paths) >= 2
-
-    # === PRIMARY ARRIVAL (paths[0]) ======================================
-    if has_reflection:
-        primary_mono = mono.copy()  # independent copy; mono reused below
-    else:
-        primary_mono = mono         # no reflection, safe to modify in place
+    primary_mono = mono
 
     # Corner-driven FFT lowpass (with line-of-sight check to ignore grid discretization corners)
     primary_cutoff = _primary_cutoff_hz(
@@ -673,105 +616,6 @@ def process_block(
     out = np.empty((n_frames, 2), dtype=np.float32)
     out[:, 0] = primary_mono * primary_left
     out[:, 1] = primary_mono * primary_right
-
-    # === REFLECTED ARRIVAL (paths[1], when present) ======================
-    if has_reflection:
-        ref_path = paths[1]
-
-        # -- Filter (same function, second path's corners) ----------------
-        ref_mono = mono  # reuse original copy (primary_mono is independent)
-        ref_cutoff = _corner_cutoff_hz(ref_path.corners)
-        if ref_cutoff < nyquist:
-            ref_mono = _fft_lowpass(ref_mono, ref_cutoff, sample_rate)
-
-        # -- Distance gain ------------------------------------------------
-        ref_gain_val = 1.0 / (1.0 + 0.08 * ref_path.length)
-        ref_mono = ref_mono * ref_gain_val  # new array (avoids aliasing mono)
-
-        # -- Material gain (per-corner reflectivity) ----------------------
-        # Identify the corner cells of the reflected path using the same
-        # direction-change logic as pathfinding._count_corners, so the set
-        # of corner cells is identical to what produced ref_path.corners.
-        #
-        # Corner identification (mirrors pathfinding._count_corners exactly):
-        #   prev direction = cells[1] - cells[0]
-        #   for i in range(2, len(cells)):
-        #       if direction(cells[i]-cells[i-1]) != prev: corner at cells[i-1]
-        #
-        # This guarantees: len(corner_cells) == ref_path.corners.
-        cells = ref_path.cells
-        ref_material_gain: float = 1.0
-        if len(cells) >= 3 and wall_gains:
-            prev_dx = cells[1][0] - cells[0][0]
-            prev_dy = cells[1][1] - cells[0][1]
-            corner_count_check: int = 0
-            for i in range(2, len(cells)):
-                dx = cells[i][0] - cells[i - 1][0]
-                dy = cells[i][1] - cells[i - 1][1]
-                if dx != prev_dx or dy != prev_dy:
-                    # cells[i-1] is the corner cell — look up adjacent wall
-                    ref_material_gain *= _corner_material_gain(cells[i - 1], wall_gains)
-                    corner_count_check += 1
-                prev_dx = dx
-                prev_dy = dy
-            # Assertion (debug-mode only): our loop counts must agree with
-            # ref_path.corners as computed by pathfinding._count_corners.
-            # Both use identical direction-change logic so they must match.
-            assert corner_count_check == ref_path.corners, (
-                f"Corner count mismatch: loop counted {corner_count_check}, "
-                f"ref_path.corners={ref_path.corners}"
-            )
-        elif len(cells) >= 3:
-            # wall_gains is empty (backward-compat / tests): apply the
-            # default material gain for each corner so tests still reflect
-            # the material system semantics consistently.
-            ref_material_gain = _DEFAULT_MATERIAL_GAIN ** ref_path.corners
-
-        ref_mono = ref_mono * ref_material_gain
-
-        # -- Delay --------------------------------------------------------
-        delay_samples = int(round(
-            (ref_path.length - primary_path.length) * _SAMPLES_PER_GRID_UNIT
-        ))
-        delay_samples = max(0, min(delay_samples, _MAX_DELAY_SAMPLES))
-
-        ref_delayed = _delay_line_process(
-            ref_mono, delay_samples, filter_state, n_frames,
-        )
-
-        # -- Pan (final-segment direction) --------------------------------
-        # The path is stored listener-first: cells[0] = listener,
-        # cells[-1] = source.  We use the direction of the last segment
-        # (cells[-2] -> cells[-1]) as a simplified directional cue for
-        # the reflected arrival's panning.
-        cells = ref_path.cells
-        if len(cells) >= 2:
-            # Use the segment(s) LEAVING the listener, not arriving at the source —
-            # panning represents how the listener perceives arrival direction.
-            # Average over a short run to avoid single-step jitter from grid
-            # discretization changing frame to frame.
-            lookahead = min(4, len(cells) - 1)
-            dx_ref = float(cells[lookahead][0] - cells[0][0])
-            ref_scale = float(lookahead)
-        else:
-            dx_ref = 0.0
-            ref_scale = 1.0
-        ref_pan = np.clip(dx_ref / max(1.0, ref_scale), -1.0, 1.0)        
-        
-        ref_right = 0.5 * (1.0 + ref_pan)
-        ref_left = 0.5 * (1.0 - ref_pan)
-
-        # -- Add reflected arrival to output (summed, no rescaling) -------
-        out[:, 0] += ref_delayed * ref_left
-        out[:, 1] += ref_delayed * ref_right
-    else:
-        # Single path only.  Flush delay buffer with silence so stale
-        # reflected audio doesn't leak if a second path appears later.
-        if "reflection_delay_buf" in filter_state:
-            _delay_line_process(
-                np.zeros(n_frames, dtype=np.float32),
-                0, filter_state, n_frames,
-            )
 
     # === THROUGH-WALL TRANSMISSION ARRIVAL (Family B) =====================
     transmission_path = filter_state.get("_geom_cache_transmission_path")

@@ -14,6 +14,8 @@ Layout:
 """
 
 from __future__ import annotations
+from time import thread_time
+
 
 import os
 import sys

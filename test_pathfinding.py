@@ -7,7 +7,11 @@ scenarios and prints clear PASS/FAIL lines a human can skim in a terminal.
 Usage:  python test_pathfinding.py
 """
 
-from pathfinding import find_k_paths, PathResult
+from pathfinding import (
+    find_k_paths, PathResult,
+    find_reflector_candidates, find_transmission_path,
+    ReflectorCandidate, has_line_of_sight,
+)
 from shared_state import GRID_COLS, GRID_ROWS
 
 
@@ -168,6 +172,163 @@ def test_float_inputs_rounded() -> None:
         _pf("length == 4.0", abs(r.length - 4.0) < 1e-9, f"got {r.length:.4f}")
 
 
+# ---------------------------------------------------------------------------
+# Stage 1C tests: reflector candidates, transmission path
+# ---------------------------------------------------------------------------
+
+
+def test_reflector_single_candidate() -> None:
+    """Single wall cell as a plausible reflector -- should return exactly one candidate."""
+    print("\n--- Test: reflector -- single candidate ---")
+    source = (20, 12)
+    listener = (20, 5)
+    # Wall directly south of source, on ray index 3 (angle = pi/2).
+    # Step 5: round(20 + 5*0, 12 + 5*1) = (20, 17).
+    walls = {(20, 17)}
+    wall_gains = {(20, 17): 0.7}
+    results = find_reflector_candidates(
+        source, listener, walls, wall_gains, GRID_COLS, GRID_ROWS,
+    )
+    _pf("returns exactly 1 candidate", len(results) == 1, f"got {len(results)}")
+    if results:
+        _pf("wall_cell == (20, 17)", results[0].wall_cell == (20, 17),
+            f"got {results[0].wall_cell}")
+        _pf("material_gain == 0.7", results[0].material_gain == 0.7,
+            f"got {results[0].material_gain}")
+
+
+def test_reflector_multiple_sorted_by_loudness() -> None:
+    """Three wall cells at varying distances/gains -- verify loudness sort order."""
+    print("\n--- Test: reflector -- multiple candidates, sorted by loudness ---")
+    source = (20, 12)
+    listener = (20, 2)
+    # Three walls on cardinal rays from source:
+    #   (20, 15) -- south ray (i=3), distance 3, gain 0.9
+    #   (17, 12) -- west ray  (i=6), distance 3, gain 0.8
+    #   (23, 12) -- east ray  (i=0), distance 3, gain 0.5
+    walls = {(20, 15), (17, 12), (23, 12)}
+    wall_gains = {(20, 15): 0.9, (17, 12): 0.8, (23, 12): 0.5}
+
+    # Hand-computed loudness = (1/(1 + 0.15*2*d)) * gain:
+    #   (20,15): d=3 -> (1/1.9)*0.9 = 0.47368...
+    #   (17,12): d=3 -> (1/1.9)*0.8 = 0.42105...
+    #   (23,12): d=3 -> (1/1.9)*0.5 = 0.26316...
+    # Expected order (descending loudness): (20,15), (17,12), (23,12)
+    expected_order = [(20, 15), (17, 12), (23, 12)]
+
+    results = find_reflector_candidates(
+        source, listener, walls, wall_gains, GRID_COLS, GRID_ROWS,
+    )
+    actual_order = [c.wall_cell for c in results]
+    _pf("returns 3 candidates", len(results) == 3, f"got {len(results)}")
+    _pf("wall_cells in correct loudness order",
+        actual_order == expected_order,
+        f"expected {expected_order}, got {actual_order}")
+
+
+def test_reflector_none_in_radius() -> None:
+    """No walls at all -- should return empty list without error."""
+    print("\n--- Test: reflector -- no walls in radius ---")
+    source = (20, 12)
+    listener = (20, 5)
+    walls: set[tuple[int, int]] = set()
+    wall_gains: dict[tuple[int, int], float] = {}
+    results = find_reflector_candidates(
+        source, listener, walls, wall_gains, GRID_COLS, GRID_ROWS,
+    )
+    _pf("returns empty list", results == [], f"got {results}")
+
+
+def test_reflector_sealed_source() -> None:
+    """Source fully sealed by walls -- no routed path, but reflectors still found."""
+    print("\n--- Test: reflector -- sealed source still finds candidates ---")
+    source = (20, 12)
+    listener = (10, 12)
+    # Seal source with a ring of walls at distance 1 (8 cells surrounding it).
+    seal = set()
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            if dx == 0 and dy == 0:
+                continue
+            seal.add((20 + dx, 12 + dy))
+    walls = seal
+    wall_gains = {cell: 0.6 for cell in walls}
+
+    # Precondition: no routed path exists through the seal.
+    routed = find_k_paths(source, listener, walls, GRID_COLS, GRID_ROWS, k=1)
+    _pf("precondition: no routed path (source sealed)", len(routed) == 0,
+        f"got {len(routed)} paths")
+
+    # Despite the seal, ray i=6 (angle=pi, west) hits (19,12) at step 1.
+    # source->(19,12) LoS: Bresenham walk from (20,12) to (19,12) has only
+    # 1 step and both endpoints are excluded from wall check -> True.
+    # (19,12)->(10,12) LoS: straight horizontal line, no walls between -> True.
+    _pf("precondition: source->wall(19,12) LoS clear",
+        has_line_of_sight(source, (19, 12), walls))
+    _pf("precondition: wall(19,12)->listener LoS clear",
+        has_line_of_sight((19, 12), listener, walls))
+
+    results = find_reflector_candidates(
+        source, listener, walls, wall_gains, GRID_COLS, GRID_ROWS,
+    )
+    _pf("returns >= 1 candidate", len(results) >= 1, f"got {len(results)}")
+    found_cells = [c.wall_cell for c in results]
+    _pf("(19, 12) is among candidates", (19, 12) in found_cells,
+        f"got {found_cells}")
+
+
+def test_transmission_zero_walls() -> None:
+    """No walls on direct line -- should return None."""
+    print("\n--- Test: transmission -- zero walls crossed ---")
+    source = (5, 10)
+    listener = (15, 10)
+    walls: set[tuple[int, int]] = set()
+    wall_gains: dict[tuple[int, int], float] = {}
+    result = find_transmission_path(
+        source, listener, walls, wall_gains, GRID_COLS, GRID_ROWS,
+    )
+    _pf("returns None", result is None, f"got {result}")
+
+
+def test_transmission_one_wall() -> None:
+    """One wall cell on the direct line -- returns list of length 1."""
+    print("\n--- Test: transmission -- one wall crossed ---")
+    source = (5, 10)
+    listener = (15, 10)
+    # (10, 10) is directly on the horizontal Bresenham line between them.
+    walls = {(10, 10)}
+    wall_gains = {(10, 10): 0.4}
+    result = find_transmission_path(
+        source, listener, walls, wall_gains, GRID_COLS, GRID_ROWS,
+    )
+    _pf("returns a list (not None)", result is not None, f"got {result}")
+    if result is not None:
+        _pf("length == 1", len(result) == 1, f"got {len(result)}")
+        _pf("cell == (10, 10)", result[0][0] == (10, 10), f"got {result[0][0]}")
+        _pf("gain == 0.4", result[0][1] == 0.4, f"got {result[0][1]}")
+
+
+def test_transmission_multiple_walls() -> None:
+    """Two walls on the direct line -- returns both in source-to-listener order."""
+    print("\n--- Test: transmission -- multiple walls crossed ---")
+    source = (5, 10)
+    listener = (15, 10)
+    # (8, 10) and (12, 10) are both on the horizontal Bresenham line.
+    # Source is at x=5 going toward x=15, so (8,10) is crossed first.
+    walls = {(8, 10), (12, 10)}
+    wall_gains = {(8, 10): 0.3, (12, 10): 0.7}
+    result = find_transmission_path(
+        source, listener, walls, wall_gains, GRID_COLS, GRID_ROWS,
+    )
+    expected = [((8, 10), 0.3), ((12, 10), 0.7)]
+    _pf("returns a list (not None)", result is not None, f"got {result}")
+    if result is not None:
+        _pf("length == 2", len(result) == 2, f"got {len(result)}")
+        _pf("full list matches expected order and gains",
+            result == expected,
+            f"expected {expected}, got {result}")
+
+
 def main() -> None:
     print("=" * 60)
     print("  pathfinding.py -- verification script")
@@ -182,6 +343,14 @@ def main() -> None:
     test_k_multiple_paths()
     test_start_on_wall()
     test_float_inputs_rounded()
+
+    test_reflector_single_candidate()
+    test_reflector_multiple_sorted_by_loudness()
+    test_reflector_none_in_radius()
+    test_reflector_sealed_source()
+    test_transmission_zero_walls()
+    test_transmission_one_wall()
+    test_transmission_multiple_walls()
 
     print("\n" + "=" * 60)
     print("  Done.  Review PASS/FAIL lines above.")

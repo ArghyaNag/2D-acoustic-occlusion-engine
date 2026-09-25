@@ -49,7 +49,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
-from shared_state import GRID_COLS, GRID_ROWS
+from shared_state import GRID_COLS, GRID_ROWS, DEFAULT_WALL_GAIN
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -202,6 +202,49 @@ def _a_star(
                 counter += 1
 
     return None  # No path
+
+
+# ---------------------------------------------------------------------------
+# Line-of-sight (Bresenham walk) — relocated from dsp_engine.py
+# ---------------------------------------------------------------------------
+def has_line_of_sight(
+    p0: tuple[int, int],
+    p1: tuple[int, int],
+    walls: set[tuple[int, int]] | frozenset[tuple[int, int]],
+) -> bool:
+    """Check if the direct straight line between p0 and p1 is unobstructed.
+
+    Uses Bresenham's algorithm to walk grid cells between p0 and p1.
+    Endpoints p0 and p1 are excluded from the wall check so standing on
+    a wall coordinate is not self-blocking.
+    """
+    if not walls:
+        return True
+
+    x0, y0 = p0
+    x1, y1 = p1
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx - dy
+
+    x, y = x0, y0
+    while True:
+        if (x, y) != (x0, y0) and (x, y) != (x1, y1):
+            if (x, y) in walls:
+                return False
+        if x == x1 and y == y1:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x += sx
+        if e2 < dx:
+            err += dx
+            y += sy
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -366,3 +409,154 @@ def find_k_paths(
         a_paths.append(best)
 
     return [_make_result(p) for p in a_paths]
+
+
+# ---------------------------------------------------------------------------
+# Reflector / transmission geometry (Stage 1B)
+# ---------------------------------------------------------------------------
+
+# Number of evenly-spaced ray directions for the reflector fan search.
+_RAY_FAN_COUNT: int = 12
+
+
+@dataclass
+class ReflectorCandidate:
+    """Result of one qualifying reflector-candidate query.
+
+    Attributes
+    ----------
+    wall_cell : tuple[int, int]
+        Grid cell of the candidate reflecting wall.
+    distance_to_wall : float
+        Euclidean distance from source_pos to wall_cell.
+    material_gain : float
+        This wall cell's reflectivity gain (from wall_gains).
+    """
+    wall_cell: tuple[int, int]
+    distance_to_wall: float
+    material_gain: float
+
+
+def find_reflector_candidates(
+    source_pos: tuple[int, int],
+    listener_pos: tuple[int, int],
+    walls: set[tuple[int, int]] | frozenset[tuple[int, int]],
+    wall_gains: dict[tuple[int, int], float],
+    grid_cols: int,
+    grid_rows: int,
+    max_candidates: int = 4,
+    # Half the grid's larger dimension (40); comfortably reaches room-sized
+    # layouts on a 40x24 grid without unbounded search.
+    max_search_radius: int = 20,
+) -> list[ReflectorCandidate]:
+    """Find wall cells that are plausible acoustic reflectors for a source.
+
+    Fans out ``_RAY_FAN_COUNT`` evenly-spaced rays from *source_pos*,
+    walking each outward until a wall cell is hit, the grid boundary is
+    exited, or *max_search_radius* cells have been stepped.  Each
+    candidate is filtered by line-of-sight (both source→wall and
+    wall→listener must be clear), then ranked by predicted echo loudness.
+
+    No angle-of-incidence check is performed — deliberate simplification.
+    """
+    if not walls:
+        return []
+
+    angle_step = 2.0 * math.pi / _RAY_FAN_COUNT
+    seen: set[tuple[int, int]] = set()
+    candidates: list[ReflectorCandidate] = []
+
+    for i in range(_RAY_FAN_COUNT):
+        angle = i * angle_step
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+
+        # Step outward from source_pos, checking every cell for walls.
+        hit: tuple[int, int] | None = None
+        for step in range(1, max_search_radius + 1):
+            cx = round(source_pos[0] + step * cos_a)
+            cy = round(source_pos[1] + step * sin_a)
+            # Bounds check
+            if cx < 0 or cx >= grid_cols or cy < 0 or cy >= grid_rows:
+                break
+            if (cx, cy) in walls:
+                hit = (cx, cy)
+                break
+
+        if hit is None or hit in seen:
+            continue
+        seen.add(hit)
+
+        # Plausibility: source→wall (defensive) and wall→listener (real filter)
+        if not has_line_of_sight(source_pos, hit, walls):
+            continue
+        if not has_line_of_sight(hit, listener_pos, walls):
+            continue
+
+        dx = hit[0] - source_pos[0]
+        dy = hit[1] - source_pos[1]
+        dist = math.sqrt(dx * dx + dy * dy)
+        mat_gain = wall_gains.get(hit, DEFAULT_WALL_GAIN)  # fall back to default material if this wall has no explicit gain recorded
+
+        candidates.append(ReflectorCandidate(
+            wall_cell=hit,
+            distance_to_wall=dist,
+            material_gain=mat_gain,
+        ))
+
+    # Sort by predicted echo loudness, descending.
+    # loudness = distance_gain(2 * dist) * material_gain
+    # distance_gain(d) = 1.0 / (1.0 + 0.15 * d)   — exact current formula
+    def _loudness(c: ReflectorCandidate) -> float:
+        return (1.0 / (1.0 + 0.15 * 2.0 * c.distance_to_wall)) * c.material_gain
+
+    candidates.sort(key=_loudness, reverse=True)
+    return candidates[:max_candidates]
+
+
+def find_transmission_path(
+    source_pos: tuple[int, int],
+    listener_pos: tuple[int, int],
+    walls: set[tuple[int, int]] | frozenset[tuple[int, int]],
+    wall_gains: dict[tuple[int, int], float],
+    grid_cols: int,
+    grid_rows: int,
+) -> list[tuple[tuple[int, int], float]] | None:
+    """Walk the direct line from source to listener, recording every wall crossed.
+
+    Straight-line transmission only; no search for alternative/cheaper
+    through-wall routes is performed (deliberate simplification).
+
+    Returns an ordered list of ``(wall_cell, material_gain)`` tuples
+    (source-to-listener order), or ``None`` if the line crosses zero walls.
+    Endpoints follow the same exclusion convention as has_line_of_sight.
+    """
+    if source_pos == listener_pos:
+        return None
+
+    x0, y0 = source_pos
+    x1, y1 = listener_pos
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx - dy
+
+    crossed: list[tuple[tuple[int, int], float]] = []
+
+    x, y = x0, y0
+    while True:
+        if (x, y) != (x0, y0) and (x, y) != (x1, y1):
+            if (x, y) in walls:
+                crossed.append(((x, y), wall_gains.get((x, y), DEFAULT_WALL_GAIN)))  # fall back to default material if this wall has no explicit gain recorded
+        if x == x1 and y == y1:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x += sx
+        if e2 < dx:
+            err += dx
+            y += sy
+
+    return crossed if crossed else None

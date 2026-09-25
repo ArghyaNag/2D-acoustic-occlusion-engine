@@ -298,9 +298,9 @@ def test_line_of_sight_discretization_bug() -> None:
     from dsp_engine import (
         _BASE_CUTOFF_HZ,
         _corner_cutoff_hz,
-        _has_line_of_sight,
         _primary_cutoff_hz,
     )
+    from pathfinding import has_line_of_sight
 
     listener = (5, 5)
     source_awkward = (13, 9)
@@ -312,8 +312,8 @@ def test_line_of_sight_discretization_bug() -> None:
     _pf("awkward angle: primary path has geometric corners", paths_awkward[0].corners > 0,
         f"got {paths_awkward[0].corners} corners")
 
-    has_los = _has_line_of_sight(listener, source_awkward, open_walls)
-    _pf("awkward angle: _has_line_of_sight is True (open grid)", has_los)
+    has_los = has_line_of_sight(listener, source_awkward, open_walls)
+    _pf("awkward angle: has_line_of_sight is True (open grid)", has_los)
 
     primary_cutoff = _primary_cutoff_hz(listener, source_awkward, paths_awkward[0].corners, open_walls)
     _pf("awkward angle: primary cutoff == _BASE_CUTOFF_HZ (4000 Hz)",
@@ -330,8 +330,8 @@ def test_line_of_sight_discretization_bug() -> None:
 
     # 3. Awkward angle WITH blocking wall on straight line
     blocking_walls = frozenset([(9, 7)])  # on Bresenham line between (5,5) and (13,9)
-    has_los_blocked = _has_line_of_sight(listener, source_awkward, blocking_walls)
-    _pf("blocking wall: _has_line_of_sight is False", not has_los_blocked)
+    has_los_blocked = has_line_of_sight(listener, source_awkward, blocking_walls)
+    _pf("blocking wall: has_line_of_sight is False", not has_los_blocked)
 
     paths_blocked = find_k_paths(listener, source_awkward, blocking_walls, GRID_COLS, GRID_ROWS, k=2)
     if paths_blocked:
@@ -345,11 +345,11 @@ def test_line_of_sight_discretization_bug() -> None:
     # 4. Same-row and 45-deg diagonal open-grid cases unaffected
     source_row = (10, 5)
     source_diag = (12, 12)
-    _pf("same-row open grid has LoS", _has_line_of_sight(listener, source_row, open_walls))
+    _pf("same-row open grid has LoS", has_line_of_sight(listener, source_row, open_walls))
     _pf("same-row primary cutoff == 4000 Hz",
         _primary_cutoff_hz(listener, source_row, 0, open_walls) == _BASE_CUTOFF_HZ)
 
-    _pf("45-deg diag open grid has LoS", _has_line_of_sight(listener, source_diag, open_walls))
+    _pf("45-deg diag open grid has LoS", has_line_of_sight(listener, source_diag, open_walls))
     _pf("45-deg diag primary cutoff == 4000 Hz",
         _primary_cutoff_hz(listener, source_diag, 0, open_walls) == _BASE_CUTOFF_HZ)
 
@@ -367,6 +367,153 @@ def test_line_of_sight_discretization_bug() -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Stage 2C tests: geometry-cache lifecycle
+# ---------------------------------------------------------------------------
+from unittest.mock import patch
+from pathfinding import (
+    find_reflector_candidates as _real_frc,
+    find_transmission_path as _real_ftp,
+)
+
+
+def test_geometry_cache_populates_on_first_call() -> None:
+    """Cache keys must exist in filter_state after the very first process_block call."""
+    print("\n--- Test: geometry cache -- populates on first call ---")
+    listener = (5.0, 5.0)
+    source = (12.0, 8.0)
+    walls = frozenset((8, y) for y in range(4, 10))
+    fstate: dict = {}
+    block = np.zeros(N, dtype=np.float32)
+    dsp_engine.process_block(block, listener, source, walls, SR, fstate)
+    _pf("_geom_cache_reflector_candidates populated",
+        "_geom_cache_reflector_candidates" in fstate)
+    _pf("_geom_cache_transmission_path populated",
+        "_geom_cache_transmission_path" in fstate)
+
+
+def test_geometry_cache_not_recomputed_when_unchanged() -> None:
+    """Identical inputs on second call must NOT re-run geometry functions."""
+    print("\n--- Test: geometry cache -- not recomputed when unchanged ---")
+    listener = (5.0, 5.0)
+    source = (12.0, 8.0)
+    walls = frozenset((8, y) for y in range(4, 10))
+    fstate: dict = {}
+    block = np.zeros(N, dtype=np.float32)
+
+    with patch("dsp_engine.find_reflector_candidates", wraps=_real_frc) as m_frc, \
+         patch("dsp_engine.find_transmission_path", wraps=_real_ftp) as m_ftp:
+        dsp_engine.process_block(block, listener, source, walls, SR, fstate)
+        count_after_1_frc = m_frc.call_count
+        count_after_1_ftp = m_ftp.call_count
+        _pf("first call invoked find_reflector_candidates",
+            count_after_1_frc == 1, f"call_count={count_after_1_frc}")
+        _pf("first call invoked find_transmission_path",
+            count_after_1_ftp == 1, f"call_count={count_after_1_ftp}")
+
+        dsp_engine.process_block(block, listener, source, walls, SR, fstate)
+        _pf("second call did NOT re-invoke find_reflector_candidates",
+            m_frc.call_count == count_after_1_frc,
+            f"call_count={m_frc.call_count}")
+        _pf("second call did NOT re-invoke find_transmission_path",
+            m_ftp.call_count == count_after_1_ftp,
+            f"call_count={m_ftp.call_count}")
+
+
+def test_geometry_cache_invalidates_on_wall_change() -> None:
+    """Changing walls between calls must trigger recomputation."""
+    print("\n--- Test: geometry cache -- invalidates on wall change ---")
+    listener = (5.0, 10.0)
+    source = (15.0, 10.0)
+    walls_a = frozenset()  # no walls -- transmission should be None
+    walls_b = frozenset([(10, 10)])  # wall on direct line
+    wall_gains_b = {(10, 10): 0.4}
+    fstate: dict = {}
+    block = np.zeros(N, dtype=np.float32)
+
+    with patch("dsp_engine.find_reflector_candidates", wraps=_real_frc) as m_frc, \
+         patch("dsp_engine.find_transmission_path", wraps=_real_ftp) as m_ftp:
+        # Call 1: no walls
+        dsp_engine.process_block(block, listener, source, walls_a, SR, fstate)
+        count_after_1 = m_frc.call_count
+        cached_trans_a = fstate["_geom_cache_transmission_path"]
+        _pf("call 1: transmission is None (no walls)",
+            cached_trans_a is None, f"got {cached_trans_a}")
+
+        # Call 2: wall added
+        dsp_engine.process_block(
+            block, listener, source, walls_b, SR, fstate,
+            wall_gains=wall_gains_b,
+        )
+        _pf("call 2: geometry recomputed after wall change",
+            m_frc.call_count > count_after_1,
+            f"call_count={m_frc.call_count}")
+        cached_trans_b = fstate["_geom_cache_transmission_path"]
+        _pf("call 2: transmission now non-None (wall crossed)",
+            cached_trans_b is not None, f"got {cached_trans_b}")
+
+
+def test_geometry_cache_invalidates_on_source_move() -> None:
+    """Moving source between calls must trigger recomputation."""
+    print("\n--- Test: geometry cache -- invalidates on source move ---")
+    listener = (5.0, 5.0)
+    source_a = (12.0, 8.0)
+    source_b = (15.0, 8.0)
+    walls = frozenset((8, y) for y in range(4, 10))
+    fstate: dict = {}
+    block = np.zeros(N, dtype=np.float32)
+
+    with patch("dsp_engine.find_reflector_candidates", wraps=_real_frc) as m_frc, \
+         patch("dsp_engine.find_transmission_path", wraps=_real_ftp) as m_ftp:
+        dsp_engine.process_block(block, listener, source_a, walls, SR, fstate)
+        count_after_1 = m_frc.call_count
+        dsp_engine.process_block(block, listener, source_b, walls, SR, fstate)
+        _pf("source move triggered recomputation",
+            m_frc.call_count > count_after_1,
+            f"call_count={m_frc.call_count}")
+
+
+def test_geometry_cache_invalidates_on_listener_move() -> None:
+    """Moving listener between calls must trigger recomputation."""
+    print("\n--- Test: geometry cache -- invalidates on listener move ---")
+    listener_a = (5.0, 5.0)
+    listener_b = (6.0, 5.0)
+    source = (12.0, 8.0)
+    walls = frozenset((8, y) for y in range(4, 10))
+    fstate: dict = {}
+    block = np.zeros(N, dtype=np.float32)
+
+    with patch("dsp_engine.find_reflector_candidates", wraps=_real_frc) as m_frc, \
+         patch("dsp_engine.find_transmission_path", wraps=_real_ftp) as m_ftp:
+        dsp_engine.process_block(block, listener_a, source, walls, SR, fstate)
+        count_after_1 = m_frc.call_count
+        dsp_engine.process_block(block, listener_b, source, walls, SR, fstate)
+        _pf("listener move triggered recomputation",
+            m_frc.call_count > count_after_1,
+            f"call_count={m_frc.call_count}")
+
+
+def test_geometry_cache_survives_unrelated_blocks() -> None:
+    """5 consecutive blocks with same layout must invoke geometry only once."""
+    print("\n--- Test: geometry cache -- survives unrelated blocks ---")
+    listener = (5.0, 5.0)
+    source = (12.0, 8.0)
+    walls = frozenset((8, y) for y in range(4, 10))
+    fstate: dict = {}
+    n_blocks = 5
+
+    with patch("dsp_engine.find_reflector_candidates", wraps=_real_frc) as m_frc, \
+         patch("dsp_engine.find_transmission_path", wraps=_real_ftp) as m_ftp:
+        for i in range(n_blocks):
+            t = (np.arange(N, dtype=np.float32) + i * N) / SR
+            block = (0.4 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+            dsp_engine.process_block(block, listener, source, walls, SR, fstate)
+        _pf(f"find_reflector_candidates called exactly 1 time across {n_blocks} blocks",
+            m_frc.call_count == 1, f"call_count={m_frc.call_count}")
+        _pf(f"find_transmission_path called exactly 1 time across {n_blocks} blocks",
+            m_ftp.call_count == 1, f"call_count={m_ftp.call_count}")
+
+
 def main() -> None:
     print("=" * 60)
     print("  dsp_engine.py -- verification script")
@@ -380,6 +527,13 @@ def main() -> None:
     test_high_corner_cutoff_floor()
     test_multi_block_continuity()
     test_line_of_sight_discretization_bug()
+
+    test_geometry_cache_populates_on_first_call()
+    test_geometry_cache_not_recomputed_when_unchanged()
+    test_geometry_cache_invalidates_on_wall_change()
+    test_geometry_cache_invalidates_on_source_move()
+    test_geometry_cache_invalidates_on_listener_move()
+    test_geometry_cache_survives_unrelated_blocks()
 
     print("\n" + "=" * 60)
     print("  Done.  Review PASS/FAIL lines above.")

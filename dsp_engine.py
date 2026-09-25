@@ -81,7 +81,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from pathfinding import find_k_paths
+from pathfinding import (
+    find_k_paths, has_line_of_sight,
+    find_reflector_candidates, find_transmission_path,
+)
 from shared_state import GRID_COLS, GRID_ROWS, WALL_GAIN_MEDIUM
 
 
@@ -123,46 +126,8 @@ _DEFAULT_MATERIAL_GAIN: float = WALL_GAIN_MEDIUM
 
 
 # ---------------------------------------------------------------------------
-# Corner-driven cutoff & Line-of-sight computation
+# Corner-driven cutoff computation
 # ---------------------------------------------------------------------------
-def _has_line_of_sight(
-    p0: tuple[int, int],
-    p1: tuple[int, int],
-    walls: set[tuple[int, int]] | frozenset[tuple[int, int]],
-) -> bool:
-    """Check if the direct straight line between p0 and p1 is unobstructed.
-
-    Uses Bresenham's algorithm to walk grid cells between p0 and p1.
-    Endpoints p0 and p1 are excluded from the wall check so standing on
-    a wall coordinate is not self-blocking.
-    """
-    if not walls:
-        return True
-
-    x0, y0 = p0
-    x1, y1 = p1
-    dx = abs(x1 - x0)
-    dy = abs(y1 - y0)
-    sx = 1 if x0 < x1 else -1
-    sy = 1 if y0 < y1 else -1
-    err = dx - dy
-
-    x, y = x0, y0
-    while True:
-        if (x, y) != (x0, y0) and (x, y) != (x1, y1):
-            if (x, y) in walls:
-                return False
-        if x == x1 and y == y1:
-            break
-        e2 = 2 * err
-        if e2 > -dy:
-            err -= dy
-            x += sx
-        if e2 < dx:
-            err += dx
-            y += sy
-
-    return True
 
 
 def _corner_cutoff_hz(corners: int) -> float:
@@ -228,7 +193,7 @@ def _primary_cutoff_hz(
     the full _BASE_CUTOFF_HZ is returned regardless of grid-discretization
     corners.  If obstructed by a wall, the corner-driven formula is used.
     """
-    if _has_line_of_sight(listener_cell, source_cell, walls):
+    if has_line_of_sight(listener_cell, source_cell, walls):
         return _BASE_CUTOFF_HZ
     return _corner_cutoff_hz(corners)
 
@@ -284,6 +249,62 @@ def _fft_lowpass(mono: np.ndarray, cutoff_hz: float, sample_rate: int) -> np.nda
 
     spectrum *= gains
     return np.fft.irfft(spectrum, n=n).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Geometry-cache staleness detection (Stage 2A)
+# ---------------------------------------------------------------------------
+_GEOM_CACHE_SOURCE_POS_KEY = "_geom_cache_source_pos"
+_GEOM_CACHE_LISTENER_POS_KEY = "_geom_cache_listener_pos"
+_GEOM_CACHE_WALLS_KEY = "_geom_cache_walls"
+
+
+def _geometry_cache_is_stale(
+    filter_state: dict,
+    source_pos: tuple[float, float],
+    listener_pos: tuple[float, float],
+    walls: set[tuple[int, int]] | frozenset[tuple[int, int]],
+) -> bool:
+    """Return True if the geometry cache needs recomputing this block.
+
+    Compares the current source_pos, listener_pos, and walls against the
+    values stored in filter_state by _geometry_cache_store_snapshot on the
+    previous block.  Returns True (stale) when any value differs or when
+    no cached snapshot exists yet (first call for this source).
+
+    Stage 2B will use the return value to decide whether to re-run
+    find_reflector_candidates / find_transmission_path.
+    """
+    if (
+        _GEOM_CACHE_SOURCE_POS_KEY not in filter_state
+        or _GEOM_CACHE_LISTENER_POS_KEY not in filter_state
+        or _GEOM_CACHE_WALLS_KEY not in filter_state
+    ):
+        return True
+    if filter_state[_GEOM_CACHE_SOURCE_POS_KEY] != source_pos:
+        return True
+    if filter_state[_GEOM_CACHE_LISTENER_POS_KEY] != listener_pos:
+        return True
+    if filter_state[_GEOM_CACHE_WALLS_KEY] != walls:
+        return True
+    return False
+
+
+def _geometry_cache_store_snapshot(
+    filter_state: dict,
+    source_pos: tuple[float, float],
+    listener_pos: tuple[float, float],
+    walls: set[tuple[int, int]] | frozenset[tuple[int, int]],
+) -> None:
+    """Record the current geometry inputs so future staleness checks work.
+
+    Called by Stage 2B right after recomputing cached reflector/transmission
+    data, to mark the cache as valid for this combination of positions and
+    walls.  Walls are stored as a frozenset for consistent equality checks.
+    """
+    filter_state[_GEOM_CACHE_SOURCE_POS_KEY] = source_pos
+    filter_state[_GEOM_CACHE_LISTENER_POS_KEY] = listener_pos
+    filter_state[_GEOM_CACHE_WALLS_KEY] = frozenset(walls)
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +435,24 @@ def process_block(
     # ---- Round float positions to integer grid cells for pathfinding ----
     listener_cell = (int(round(listener_pos[0])), int(round(listener_pos[1])))
     source_cell = (int(round(source_pos[0])), int(round(source_pos[1])))
+
+    # ---- Geometry-cache: recompute reflector/transmission data if stale --
+    if _geometry_cache_is_stale(filter_state, source_pos, listener_pos, walls):
+        filter_state["_geom_cache_reflector_candidates"] = (
+            find_reflector_candidates(
+                source_cell, listener_cell, walls, wall_gains,
+                GRID_COLS, GRID_ROWS,
+            )
+        )
+        filter_state["_geom_cache_transmission_path"] = (
+            find_transmission_path(
+                source_cell, listener_cell, walls, wall_gains,
+                GRID_COLS, GRID_ROWS,
+            )
+        )
+        _geometry_cache_store_snapshot(
+            filter_state, source_pos, listener_pos, walls,
+        )
 
     # ---- 1. Find up to 2 shortest paths via pathfinding -----------------
     paths = find_k_paths(

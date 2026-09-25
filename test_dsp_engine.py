@@ -182,11 +182,13 @@ def test_total_occlusion() -> None:
     _pf("no NaN", not np.any(np.isnan(output)))
     _pf("no inf", not np.any(np.isinf(output)))
 
-    # Peak should be very low: input_amp * floor_gain * max_channel_gain
-    # = 0.5 * 0.02 * ~0.75 = ~0.0075  (pan depends on dx/20)
+    # Peak is now above old floor-gain-only level because Family B adds
+    # transmission energy through the sealing walls.  The straight line from
+    # (0,0) to (20,12) crosses wall cell(s), so _transmission_gain > 0.
+    # updated: was peak < 0.02 (floor-gain only); Family B transmission now contributes additively.
     peak = float(np.max(np.abs(output)))
-    _pf("output peak very low (< 0.02)", peak < 0.02, f"got {peak:.6f}")
     _pf("output peak > 0 (not hard silence)", peak > 0.0, f"got {peak:.6f}")
+    _pf("output peak reasonable (< 0.5)", peak < 0.5, f"got {peak:.6f}")
 
 
 def test_same_position() -> None:
@@ -514,6 +516,139 @@ def test_geometry_cache_survives_unrelated_blocks() -> None:
             m_ftp.call_count == 1, f"call_count={m_ftp.call_count}")
 
 
+# ---------------------------------------------------------------------------
+# Stage 3C tests: Family B (through-wall transmission)
+# ---------------------------------------------------------------------------
+
+
+def test_transmission_zero_when_no_wall_crossed() -> None:
+    """No walls anywhere — Family B must contribute exactly 0."""
+    print("\n--- Test: transmission -- zero when no wall crossed ---")
+    listener = (5.0, 5.0)
+    source = (10.0, 5.0)
+    walls: frozenset[tuple[int, int]] = frozenset()
+    fstate: dict = {}
+    block = _make_sine(440.0, amp=0.5)
+    output = dsp_engine.process_block(block, listener, source, walls, SR, fstate)
+    trans_path = fstate.get("_geom_cache_transmission_path")
+    tg = dsp_engine._transmission_gain(source, listener, trans_path)
+    _pf("transmission gain == 0.0 (no walls)", tg == 0.0, f"got {tg}")
+    _pf("no NaN", not np.any(np.isnan(output)))
+    _pf("no inf", not np.any(np.isinf(output)))
+
+
+def test_transmission_contributes_during_total_occlusion() -> None:
+    """Sealed source, but transmission line crosses a wall — output exceeds floor gain."""
+    print("\n--- Test: transmission -- contributes during total occlusion ---")
+    # Seal source at (20, 12) inside a box
+    wall_set: set[tuple[int, int]] = set()
+    for x in range(19, 22):
+        wall_set.add((x, 11))
+        wall_set.add((x, 13))
+    for y in range(11, 14):
+        wall_set.add((19, y))
+        wall_set.add((21, y))
+    walls = frozenset(wall_set)
+    wall_gains = {w: 0.4 for w in walls}
+    listener = (0.0, 0.0)
+    source = (20.0, 12.0)
+
+    # Precondition: no routed path
+    paths = find_k_paths((0, 0), (20, 12), walls, GRID_COLS, GRID_ROWS, k=1)
+    _pf("precondition: no routed path", len(paths) == 0)
+
+    fstate: dict = {}
+    block = _make_sine(440.0, amp=0.5)
+    output = dsp_engine.process_block(block, listener, source, walls, SR, fstate,
+                                       wall_gains=wall_gains)
+    peak = float(np.max(np.abs(output)))
+
+    # Old floor-gain-only peak: amp * 0.02 * max_pan_gain
+    dx = source[0] - listener[0]
+    pan = float(np.clip(dx / 20.0, -1.0, 1.0))
+    floor_peak = 0.5 * 0.02 * 0.5 * (1.0 + abs(pan))
+    _pf("output peak > floor-gain-only baseline",
+        peak > floor_peak, f"peak={peak:.6f} > baseline={floor_peak:.6f}")
+    _pf("no NaN", not np.any(np.isnan(output)))
+    _pf("no inf", not np.any(np.isinf(output)))
+
+
+def test_transmission_factor_stacks_correctly() -> None:
+    """Unit-test _transmission_gain: stacking behavior matches spec."""
+    print("\n--- Test: transmission -- factor stacking ---")
+    src = (0.0, 0.0)
+    lst = (10.0, 0.0)
+    # distance_gain = 1/(1+0.15*10) = 1/2.5 = 0.4 for all cases
+
+    two_curtains = [((3, 0), 0.25), ((6, 0), 0.25)]  # product = 0.75*0.75 = 0.5625
+    one_concrete = [((5, 0), 0.90)]                    # product = 0.10
+    one_curtain  = [((5, 0), 0.25)]                    # product = 0.75
+    mixed        = [((3, 0), 0.90), ((6, 0), 0.25)]   # product = 0.10*0.75 = 0.075
+
+    g_2c = dsp_engine._transmission_gain(src, lst, two_curtains)
+    g_1r = dsp_engine._transmission_gain(src, lst, one_concrete)
+    g_1c = dsp_engine._transmission_gain(src, lst, one_curtain)
+    g_mx = dsp_engine._transmission_gain(src, lst, mixed)
+
+    _pf("two curtains > one concrete",
+        g_2c > g_1r, f"2curtain={g_2c:.6f} > 1concrete={g_1r:.6f}")
+    _pf("mixed (concrete+curtain) < single curtain alone",
+        g_mx < g_1c, f"mixed={g_mx:.6f} < 1curtain={g_1c:.6f}")
+    # Verify exact values: distance_gain=0.4
+    _pf("two curtains value correct",
+        abs(g_2c - 0.4 * 0.5625) < 1e-9, f"got {g_2c:.9f}, expected {0.4*0.5625:.9f}")
+    _pf("one concrete value correct",
+        abs(g_1r - 0.4 * 0.10) < 1e-9, f"got {g_1r:.9f}, expected {0.4*0.10:.9f}")
+
+
+def test_transmission_cutoff_steeper_with_more_walls() -> None:
+    """Unit-test _transmission_cutoff_hz: more walls = lower cutoff, floored."""
+    print("\n--- Test: transmission -- cutoff steeper with more walls ---")
+    dummy_1 = [((5, 0), 0.5)]
+    dummy_3 = [((3, 0), 0.5), ((5, 0), 0.5), ((7, 0), 0.5)]
+    dummy_10 = [((i, 0), 0.5) for i in range(10)]
+
+    c0 = dsp_engine._transmission_cutoff_hz(None)
+    c1 = dsp_engine._transmission_cutoff_hz(dummy_1)
+    c3 = dsp_engine._transmission_cutoff_hz(dummy_3)
+    c10 = dsp_engine._transmission_cutoff_hz(dummy_10)
+
+    _pf("0-wall cutoff == 1500.0", c0 == 1500.0, f"got {c0}")
+    _pf("1-wall cutoff < base", c1 < 1500.0, f"got {c1}")
+    _pf("3-wall cutoff < 1-wall cutoff", c3 < c1, f"c3={c3} < c1={c1}")
+    _pf("10-wall cutoff >= 300.0 (floor)", c10 >= 300.0, f"got {c10}")
+    _pf("10-wall cutoff == 300.0 (clamped)", c10 == 300.0, f"got {c10}")
+
+
+def test_transmission_no_nan_inf_across_configs() -> None:
+    """NaN/inf sweep with Family B-exercising configurations."""
+    print("\n--- Test: transmission NaN/inf sweep ---")
+    listener = (5.0, 10.0)
+    configs = [
+        ("no walls", (15.0, 10.0), frozenset(), {}),
+        ("1 wall low gain", (15.0, 10.0), frozenset([(10, 10)]),
+         {(10, 10): 0.2}),
+        ("1 wall high gain (near 1.0)", (15.0, 10.0), frozenset([(10, 10)]),
+         {(10, 10): 0.99}),
+        ("3 stacked walls", (15.0, 10.0),
+         frozenset([(8, 10), (10, 10), (12, 10)]),
+         {(8, 10): 0.5, (10, 10): 0.5, (12, 10): 0.5}),
+    ]
+    all_clean = True
+    block = _make_noise(amp=0.3, seed=77)
+    for label, source, walls, wg in configs:
+        fstate: dict = {}
+        out = dsp_engine.process_block(block, listener, source, walls, SR, fstate,
+                                        wall_gains=wg)
+        has_nan = bool(np.any(np.isnan(out)))
+        has_inf = bool(np.any(np.isinf(out)))
+        ok = not has_nan and not has_inf
+        _pf(f"{label}: clean output", ok, f"NaN={has_nan}, inf={has_inf}")
+        if not ok:
+            all_clean = False
+    _pf("all transmission configs clean", all_clean)
+
+
 def main() -> None:
     print("=" * 60)
     print("  dsp_engine.py -- verification script")
@@ -534,6 +669,12 @@ def main() -> None:
     test_geometry_cache_invalidates_on_source_move()
     test_geometry_cache_invalidates_on_listener_move()
     test_geometry_cache_survives_unrelated_blocks()
+
+    test_transmission_zero_when_no_wall_crossed()
+    test_transmission_contributes_during_total_occlusion()
+    test_transmission_factor_stacks_correctly()
+    test_transmission_cutoff_steeper_with_more_walls()
+    test_transmission_no_nan_inf_across_configs()
 
     print("\n" + "=" * 60)
     print("  Done.  Review PASS/FAIL lines above.")

@@ -79,6 +79,8 @@ documented as empirical / tunable):
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from pathfinding import (
@@ -103,6 +105,10 @@ _TOTAL_OCCLUSION_FLOOR_GAIN: float = 0.02
 _BASE_CUTOFF_HZ: float = 4000.0           # cutoff at 0 corners (direct LoS)
 _CUTOFF_DROP_PER_CORNER_HZ: float = 900.0  # cutoff reduction per corner
 _MIN_CUTOFF_HZ: float = 300.0             # floor -- never go below this
+
+# Through-wall transmission cutoff parameters (all in Hz) -- empirical / by-ear starting values.
+_TRANSMISSION_BASE_CUTOFF_HZ: float = 1500.0
+_TRANSMISSION_CUTOFF_DROP_PER_WALL_HZ: float = 500.0
 
 # Width of the raised-cosine transition band for the FFT lowpass (Hz).
 # Wider = smoother rolloff = shorter impulse response = fewer artifacts.
@@ -196,6 +202,57 @@ def _primary_cutoff_hz(
     if has_line_of_sight(listener_cell, source_cell, walls):
         return _BASE_CUTOFF_HZ
     return _corner_cutoff_hz(corners)
+
+
+# ---------------------------------------------------------------------------
+# Through-wall transmission helpers (Family B)
+# ---------------------------------------------------------------------------
+
+
+def _transmission_gain(
+    source_pos: tuple[float, float],
+    listener_pos: tuple[float, float],
+    transmission_path: list[tuple[tuple[int, int], float]] | None,
+) -> float:
+    """Compute through-wall transmission gain (Family B).
+
+    Straight-line distance gain times the product of each crossed wall's
+    transmission factor (1.0 - material_gain), so two low-reflectivity walls
+    (e.g. curtains) in series transmit more than one, and any single
+    high-reflectivity wall (e.g. concrete) sharply reduces it.
+    """
+    if not transmission_path:
+        return 0.0
+
+    dx = source_pos[0] - listener_pos[0]
+    dy = source_pos[1] - listener_pos[1]
+    dist = math.sqrt(dx * dx + dy * dy)
+    distance_gain = 1.0 / (1.0 + 0.15 * dist)
+
+    transmission_product = 1.0
+    for _, material_gain in transmission_path:
+        transmission_product *= (1.0 - material_gain)
+
+    return distance_gain * transmission_product
+
+
+def _transmission_cutoff_hz(
+    transmission_path: list[tuple[tuple[int, int], float]] | None,
+) -> float:
+    """Compute the lowpass cutoff frequency for through-wall transmission.
+
+    Formula: cutoff = max(_MIN_CUTOFF_HZ, _TRANSMISSION_BASE_CUTOFF_HZ - wall_count * _TRANSMISSION_CUTOFF_DROP_PER_WALL_HZ).
+    This is deliberately steeper than the routed-path cutoff to model that
+    walls preferentially attenuate high frequencies even for direct penetration.
+    """
+    if not transmission_path:
+        return _TRANSMISSION_BASE_CUTOFF_HZ
+
+    wall_count = len(transmission_path)
+    return max(
+        _MIN_CUTOFF_HZ,
+        _TRANSMISSION_BASE_CUTOFF_HZ - wall_count * _TRANSMISSION_CUTOFF_DROP_PER_WALL_HZ,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -389,9 +446,11 @@ def process_block(
 ) -> np.ndarray:                      # (n_frames, 2) stereo float32
     """Transform a mono source block into a stereo output block.
 
-    Produces up to two independently processed arrivals (primary +
-    reflected) whose panned stereo contributions are summed into the
-    returned output.
+    Produces independently processed arrivals (primary, reflected, and
+    through-wall transmission) whose panned stereo contributions are summed
+    into the returned output.  Transmission contributes whenever the direct
+    source-listener line crosses walls, independently of whether a routed
+    path exists (present in both open and totally-occluded layouts).
 
     Parameters
     ----------
@@ -430,6 +489,7 @@ def process_block(
         wall_gains = {}
 
     n_frames = input_block.shape[0]
+    nyquist = sample_rate / 2.0
     mono = input_block.astype(np.float32, copy=True)
 
     # ---- Round float positions to integer grid cells for pathfinding ----
@@ -476,7 +536,7 @@ def process_block(
                 0, filter_state, n_frames,
             )
 
-        # Pan and return (unchanged total-occlusion behavior).
+        # Pan and write baseline floor-gain output.
         dx = source_pos[0] - listener_pos[0]
         max_offset = 20.0
         pan = np.clip(dx / max_offset, -1.0, 1.0)
@@ -486,10 +546,22 @@ def process_block(
         out = np.empty((n_frames, 2), dtype=np.float32)
         out[:, 0] = mono * left_gain
         out[:, 1] = mono * right_gain
+
+        # === THROUGH-WALL TRANSMISSION ARRIVAL (Family B) =================
+        transmission_path = filter_state.get("_geom_cache_transmission_path")
+        trans_gain = _transmission_gain(source_pos, listener_pos, transmission_path)
+        if trans_gain > 0.0:
+            trans_mono = input_block.astype(np.float32, copy=True)
+            trans_cutoff = _transmission_cutoff_hz(transmission_path)
+            if trans_cutoff < nyquist:
+                trans_mono = _fft_lowpass(trans_mono, trans_cutoff, sample_rate)
+            trans_mono *= trans_gain
+            out[:, 0] += trans_mono * left_gain
+            out[:, 1] += trans_mono * right_gain
+
         return out
 
     # -- At least one path exists -----------------------------------------
-    nyquist = sample_rate / 2.0
     primary_path = paths[0]
     has_reflection = len(paths) >= 2
 
@@ -620,5 +692,17 @@ def process_block(
                 np.zeros(n_frames, dtype=np.float32),
                 0, filter_state, n_frames,
             )
+
+    # === THROUGH-WALL TRANSMISSION ARRIVAL (Family B) =====================
+    transmission_path = filter_state.get("_geom_cache_transmission_path")
+    trans_gain = _transmission_gain(source_pos, listener_pos, transmission_path)
+    if trans_gain > 0.0:
+        trans_mono = input_block.astype(np.float32, copy=True)
+        trans_cutoff = _transmission_cutoff_hz(transmission_path)
+        if trans_cutoff < nyquist:
+            trans_mono = _fft_lowpass(trans_mono, trans_cutoff, sample_rate)
+        trans_mono *= trans_gain
+        out[:, 0] += trans_mono * primary_left
+        out[:, 1] += trans_mono * primary_right
 
     return out

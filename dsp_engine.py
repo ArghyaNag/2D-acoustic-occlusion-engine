@@ -173,7 +173,11 @@ def _corner_cutoff_hz(corners: int) -> float:
     return max(_MIN_CUTOFF_HZ, _BASE_CUTOFF_HZ - corners * _CUTOFF_DROP_PER_CORNER_HZ)
 
 
-# 8 neighbour offsets used for the wall-proximity search at each corner cell.
+# 8 neighbour offsets used for the wall-proximity search at each corner
+# cell.  ORDER MATTERS: when a corner touches two different-material
+# walls at once, the neighbour earliest in this list wins the tie-break
+# (see _corner_material_gain's docstring).  Currently N/S/W/E before
+# diagonals, so orthogonal neighbours are always checked first.
 _NEIGHBOUR_OFFSETS: tuple[tuple[int, int], ...] = (
     ( 0, -1), ( 0,  1), (-1,  0), ( 1,  0),
     (-1, -1), ( 1, -1), (-1,  1), ( 1,  1),
@@ -187,10 +191,22 @@ def _corner_material_gain(
     """Return the reflectivity gain for the wall adjacent to *corner_cell*.
 
     Searches the 8 immediate neighbours of *corner_cell* for a wall entry
-    in *wall_gains*.  Returns the gain of the first neighbour found, or
-    _DEFAULT_MATERIAL_GAIN as a safe fallback if none is present (this
-    should not occur in a properly constructed reflected path, but we
-    never crash).
+    in *wall_gains*, in a fixed priority order (N, S, W, E, NW, NE, SW, SE
+    -- see _NEIGHBOUR_OFFSETS).  Returns the gain of the FIRST neighbour
+    found in that order, or _DEFAULT_MATERIAL_GAIN as a safe fallback if
+    none is present.
+
+    KNOWN SIMPLIFICATION: if a corner cell happens to be adjacent to two
+    or more walls of DIFFERENT materials at once, the neighbour earliest
+    in the fixed priority order wins (in practice, this almost always
+    means North wins), regardless of which wall the reflected path is
+    actually turning against geometrically.  This is an intentional,
+    acknowledged trade-off given project time constraints -- a fully
+    correct version would determine the gain from whichever wall cell is
+    on the path's actual turn direction, using ref_path.cells to infer
+    which side the corner bends toward.  Left as a documented limitation
+    rather than implemented, since single-material corners (the common
+    case) are unaffected.
     """
     cx, cy = corner_cell
     for dx, dy in _NEIGHBOUR_OFFSETS:

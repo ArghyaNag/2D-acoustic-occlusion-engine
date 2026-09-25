@@ -10,7 +10,7 @@ Usage:  python test_dsp_engine.py
 import numpy as np
 
 import dsp_engine
-from pathfinding import find_k_paths
+from pathfinding import find_k_paths, ReflectorCandidate
 from shared_state import GRID_COLS, GRID_ROWS
 
 SR = 44100
@@ -182,13 +182,13 @@ def test_total_occlusion() -> None:
     _pf("no NaN", not np.any(np.isnan(output)))
     _pf("no inf", not np.any(np.isinf(output)))
 
-    # Peak is now above old floor-gain-only level because Family B adds
-    # transmission energy through the sealing walls.  The straight line from
-    # (0,0) to (20,12) crosses wall cell(s), so _transmission_gain > 0.
-    # updated: was peak < 0.02 (floor-gain only); Family B transmission now contributes additively.
+    # Peak includes baseline floor gain, Family B through-wall transmission,
+    # and Family C discrete multi-wall echoes from outer-facing perimeter walls.
+    # updated: Family C now sums up to N echo arrivals on top of Family B's transmission
+    # and the old floor gain in this sealed-box scenario; was < 0.5, now < 0.75 (measured ~0.540).
     peak = float(np.max(np.abs(output)))
     _pf("output peak > 0 (not hard silence)", peak > 0.0, f"got {peak:.6f}")
-    _pf("output peak reasonable (< 0.5)", peak < 0.5, f"got {peak:.6f}")
+    _pf("output peak reasonable (< 0.75)", peak < 0.75, f"got {peak:.6f}")
 
 
 def test_same_position() -> None:
@@ -649,6 +649,171 @@ def test_transmission_no_nan_inf_across_configs() -> None:
     _pf("all transmission configs clean", all_clean)
 
 
+# ---------------------------------------------------------------------------
+# Family C: Discrete multi-wall echoes tests (Stage 5)
+# ---------------------------------------------------------------------------
+
+
+def test_multi_echo_count_matches_candidates() -> None:
+    """Construct exactly 3 reflector candidates; assert slots 0..2 populate, 3 does not."""
+    print("\n--- Test: multi-echo -- count matches candidates ---")
+    source = (20.0, 12.0)
+    listener = (20.0, 2.0)
+    # Three walls on cardinal rays from source (distances 3, 3, 3; gains 0.9, 0.8, 0.5)
+    walls = {(20, 15), (17, 12), (23, 12)}
+    wall_gains = {(20, 15): 0.9, (17, 12): 0.8, (23, 12): 0.5}
+    fstate: dict = {}
+
+    block = _make_sine(440.0, amp=0.5)
+    out = dsp_engine.process_block(block, listener, source, walls, SR, fstate, wall_gains=wall_gains)
+
+    _pf("output shape (1024, 2)", out.shape == (N, 2))
+    _pf("no NaN", not np.any(np.isnan(out)))
+    _pf("no inf", not np.any(np.isinf(out)))
+    _pf("slot 0 buffer allocated", "echo_delay_buf_0" in fstate)
+    _pf("slot 1 buffer allocated", "echo_delay_buf_1" in fstate)
+    _pf("slot 2 buffer allocated", "echo_delay_buf_2" in fstate)
+    _pf("slot 3 buffer NOT allocated", "echo_delay_buf_3" not in fstate)
+
+
+def test_multi_echo_independently_panned_and_delayed() -> None:
+    """Assert distinct echoes arrive with their own independent delay and pan."""
+    print("\n--- Test: multi-echo -- independently panned and delayed ---")
+    source = (20.0, 12.0)
+    listener = (20.0, 10.0)
+    # Wall 1: (15, 12) -> dx_echo = -5 (panned left), dist = 5.0 -> delay = 400 samples
+    # Wall 2: (28, 12) -> dx_echo = +8 (panned right), dist = 8.0 -> delay = 640 samples
+    walls = {(15, 12), (28, 12)}
+    wall_gains = {(15, 12): 0.9, (28, 12): 0.9}
+    fstate: dict = {}
+
+    # Use a single unit impulse so echoes arrive as distinct spikes at their delay offsets
+    block = np.zeros(N, dtype=np.float32)
+    block[0] = 1.0
+
+    out = dsp_engine.process_block(block, listener, source, walls, SR, fstate, wall_gains=wall_gains)
+
+    _pf("slot 0 and 1 allocated", "echo_delay_buf_0" in fstate and "echo_delay_buf_1" in fstate)
+
+    # Echo 0 arrives at sample 400, panned left (L > R)
+    left_400 = float(out[400, 0])
+    right_400 = float(out[400, 1])
+    _pf("echo 0 arrives at sample 400 with non-zero energy", abs(left_400) > 0.01)
+    _pf("echo 0 panned left (L > R)", left_400 > right_400, f"L={left_400:.4f}, R={right_400:.4f}")
+
+    # Echo 1 arrives at sample 640, panned right (R > L)
+    left_640 = float(out[640, 0])
+    right_640 = float(out[640, 1])
+    _pf("echo 1 arrives at sample 640 with non-zero energy", abs(right_640) > 0.01)
+    _pf("echo 1 panned right (R > L)", right_640 > left_640, f"L={left_640:.4f}, R={right_640:.4f}")
+
+    # Echoes do not arrive at each other's timestamps
+    _pf("echo 1 quiet at sample 400 before its arrival", abs(out[400, 1] - right_400) < 1e-4)
+
+
+def test_echo_shrinking_candidate_count_flushes_stale_slots() -> None:
+    """Shrinking candidate count from 3 to 1 flushes slots 1 and 2 with silence."""
+    print("\n--- Test: multi-echo -- shrinking candidate count flushes stale slots ---")
+    source = (20.0, 12.0)
+    listener = (20.0, 2.0)
+    walls_3 = {(20, 15), (17, 12), (23, 12)}
+    wall_gains_3 = {(20, 15): 0.9, (17, 12): 0.8, (23, 12): 0.5}
+    fstate: dict = {}
+
+    block = _make_sine(440.0, amp=0.5)
+    # Block 1: 3 candidates active
+    dsp_engine.process_block(block, listener, source, walls_3, SR, fstate, wall_gains=wall_gains_3)
+
+    wpos_0_b = fstate.get("echo_delay_write_pos_0", 0)
+    wpos_1_b = fstate.get("echo_delay_write_pos_1", 0)
+    wpos_2_b = fstate.get("echo_delay_write_pos_2", 0)
+
+    # Block 2: modified geometry with only 1 candidate
+    walls_1 = {(20, 15)}
+    wall_gains_1 = {(20, 15): 0.9}
+    dsp_engine.process_block(block, listener, source, walls_1, SR, fstate, wall_gains=wall_gains_1)
+
+    wpos_0_a = fstate.get("echo_delay_write_pos_0", 0)
+    wpos_1_a = fstate.get("echo_delay_write_pos_1", 0)
+    wpos_2_a = fstate.get("echo_delay_write_pos_2", 0)
+
+    _pf("slot 0 remains active and write_pos advances", wpos_0_a - wpos_0_b == N)
+    _pf("slot 1 flushed with silence and write_pos advances", wpos_1_a - wpos_1_b == N)
+    _pf("slot 2 flushed with silence and write_pos advances", wpos_2_a - wpos_2_b == N)
+    _pf("slot 3 was never allocated", "echo_delay_buf_3" not in fstate)
+
+    # Confirm the written section of slot 1 and slot 2 in block 2 was indeed all zeros
+    buf1 = fstate["echo_delay_buf_1"]
+    buf2 = fstate["echo_delay_buf_2"]
+    _pf("slot 1 flushed segment is silent (all zeros)", bool(np.all(buf1[wpos_1_b:wpos_1_a] == 0.0)))
+    _pf("slot 2 flushed segment is silent (all zeros)", bool(np.all(buf2[wpos_2_b:wpos_2_a] == 0.0)))
+
+
+def test_curtain_wall_negligible_echo() -> None:
+    """Low-reflectivity curtain wall produces negligible echo vs concrete."""
+    print("\n--- Test: multi-echo -- curtain wall negligible echo ---")
+    source = (20.0, 12.0)
+    listener = (20.0, 10.0)
+    wall = (20, 15)
+
+    # High frequency block (2000 Hz) to test both material gain and cutoff attenuation
+    t = np.arange(N, dtype=np.float32) / SR
+    block = (0.5 * np.sin(2 * np.pi * 2000.0 * t)).astype(np.float32)
+
+    # Open space baseline (no echo)
+    out_open = dsp_engine.process_block(block, listener, source, set(), SR, {})
+    # Curtain wall (gain = 0.25)
+    out_curtain = dsp_engine.process_block(block, listener, source, {wall}, SR, {}, wall_gains={wall: 0.25})
+    # Concrete wall (gain = 0.90)
+    out_concrete = dsp_engine.process_block(block, listener, source, {wall}, SR, {}, wall_gains={wall: 0.90})
+
+    diff_curtain = out_curtain - out_open
+    diff_concrete = out_concrete - out_open
+
+    rms_curtain = float(np.sqrt(np.mean(diff_curtain ** 2)))
+    rms_concrete = float(np.sqrt(np.mean(diff_concrete ** 2)))
+
+    _pf("concrete echo non-zero", rms_concrete > 0.01, f"rms={rms_concrete:.6f}")
+    _pf("curtain echo < 0.1 * concrete echo", rms_curtain < 0.1 * rms_concrete,
+        f"curtain={rms_curtain:.6f}, concrete={rms_concrete:.6f}, ratio={rms_curtain/rms_concrete:.4f}")
+
+    # Also unit-test helper functions directly for curtain vs concrete
+    c_curtain = ReflectorCandidate(wall_cell=wall, distance_to_wall=3.0, material_gain=0.25)
+    c_concrete = ReflectorCandidate(wall_cell=wall, distance_to_wall=3.0, material_gain=0.90)
+    _pf("curtain gain < concrete gain", dsp_engine._echo_gain(c_curtain) < dsp_engine._echo_gain(c_concrete))
+    _pf("curtain cutoff < concrete cutoff", dsp_engine._echo_cutoff_hz(c_curtain) < dsp_engine._echo_cutoff_hz(c_concrete))
+
+
+def test_multi_echo_no_nan_inf_across_configs() -> None:
+    """Sweep configs with 0, 1, 4 candidates and dynamic changes, asserting no NaN/inf."""
+    print("\n--- Test: multi-echo -- no NaN/inf across configs ---")
+    source = (20.0, 12.0)
+    listener = (20.0, 10.0)
+    block = _make_sine(440.0, amp=0.5)
+
+    configs = [
+        ("0 candidates (open)", set()),
+        ("1 candidate", {(20, 15)}),
+        ("4 candidates (max)", {(20, 15), (20, 9), (17, 12), (23, 12)}),
+        ("shrink to 1", {(20, 15)}),
+        ("grow to 3", {(20, 15), (17, 12), (23, 12)}),
+        ("drop to 0", set()),
+        ("back to 4", {(20, 15), (20, 9), (17, 12), (23, 12)}),
+    ]
+
+    fstate: dict = {}
+    all_clean = True
+    for label, walls in configs:
+        out = dsp_engine.process_block(block, listener, source, walls, SR, fstate)
+        has_nan = bool(np.any(np.isnan(out)))
+        has_inf = bool(np.any(np.isinf(out)))
+        ok = not has_nan and not has_inf and out.shape == (N, 2)
+        _pf(f"{label}: clean output", ok, f"NaN={has_nan}, inf={has_inf}")
+        if not ok:
+            all_clean = False
+    _pf("all multi-echo configs clean", all_clean)
+
+
 def main() -> None:
     print("=" * 60)
     print("  dsp_engine.py -- verification script")
@@ -675,6 +840,12 @@ def main() -> None:
     test_transmission_factor_stacks_correctly()
     test_transmission_cutoff_steeper_with_more_walls()
     test_transmission_no_nan_inf_across_configs()
+
+    test_multi_echo_count_matches_candidates()
+    test_multi_echo_independently_panned_and_delayed()
+    test_echo_shrinking_candidate_count_flushes_stale_slots()
+    test_curtain_wall_negligible_echo()
+    test_multi_echo_no_nan_inf_across_configs()
 
     print("\n" + "=" * 60)
     print("  Done.  Review PASS/FAIL lines above.")

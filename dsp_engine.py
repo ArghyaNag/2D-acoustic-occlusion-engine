@@ -85,6 +85,7 @@ import numpy as np
 
 from pathfinding import (
     find_k_paths, has_line_of_sight,
+    ReflectorCandidate,
     find_reflector_candidates, find_transmission_path,
 )
 from shared_state import GRID_COLS, GRID_ROWS, WALL_GAIN_MEDIUM
@@ -109,6 +110,12 @@ _MIN_CUTOFF_HZ: float = 300.0             # floor -- never go below this
 # Through-wall transmission cutoff parameters (all in Hz) -- empirical / by-ear starting values.
 _TRANSMISSION_BASE_CUTOFF_HZ: float = 1500.0
 _TRANSMISSION_CUTOFF_DROP_PER_WALL_HZ: float = 500.0
+
+# Discrete echo parameters (all in Hz / counts) -- empirical / by-ear starting values.
+# _MAX_SIMULTANEOUS_ECHOES matches find_reflector_candidates's max_candidates=4 cap by design.
+_MAX_SIMULTANEOUS_ECHOES: int = 4
+_ECHO_BASE_CUTOFF_HZ: float = 3500.0
+_ECHO_CUTOFF_MUFFLE_RANGE_HZ: float = 3000.0
 
 # Width of the raised-cosine transition band for the FFT lowpass (Hz).
 # Wider = smoother rolloff = shorter impulse response = fewer artifacts.
@@ -256,6 +263,36 @@ def _transmission_cutoff_hz(
 
 
 # ---------------------------------------------------------------------------
+# Discrete echo helpers (Family C)
+# ---------------------------------------------------------------------------
+
+
+def _echo_gain(candidate: ReflectorCandidate) -> float:
+    """Compute discrete echo gain (Family C).
+
+    Predicted echo loudness based on two-way distance attenuation and
+    the reflecting wall's material reflectivity.  Matches the exact
+    formula used by find_reflector_candidates() to rank candidates:
+    gain = (1.0 / (1.0 + 0.08 * 2.0 * distance_to_wall)) * material_gain.
+    """
+    return (1.0 / (1.0 + 0.08 * 2.0 * candidate.distance_to_wall)) * candidate.material_gain
+
+
+def _echo_cutoff_hz(candidate: ReflectorCandidate) -> float:
+    """Compute the lowpass cutoff frequency for a discrete echo reflection.
+
+    Formula: cutoff = max(_MIN_CUTOFF_HZ, _ECHO_BASE_CUTOFF_HZ - (1.0 - candidate.material_gain) * _ECHO_CUTOFF_MUFFLE_RANGE_HZ).
+    Softer materials (lower material_gain) produce a larger muffle term and
+    therefore a lower cutoff frequency, modeling higher high-frequency absorption
+    upon wall reflection.
+    """
+    return max(
+        _MIN_CUTOFF_HZ,
+        _ECHO_BASE_CUTOFF_HZ - (1.0 - candidate.material_gain) * _ECHO_CUTOFF_MUFFLE_RANGE_HZ,
+    )
+
+
+# ---------------------------------------------------------------------------
 # FFT-based lowpass filter (per-block, no overlap)
 # ---------------------------------------------------------------------------
 def _fft_lowpass(mono: np.ndarray, cutoff_hz: float, sample_rate: int) -> np.ndarray:
@@ -372,12 +409,15 @@ def _delay_line_process(
     delay_samples: int,
     filter_state: dict,
     n_frames: int,
+    buf_key: str = "reflection_delay_buf",
+    wpos_key: str = "reflection_delay_write_pos",
 ) -> np.ndarray:
     """Write *samples* into the reflection delay buffer and return the
     delayed readback.
 
     The buffer is a circular (ring) buffer stored in *filter_state* under
-    keys ``"reflection_delay_buf"`` and ``"reflection_delay_write_pos"``.
+    keys ``"reflection_delay_buf"`` and ``"reflection_delay_write_pos"``
+    (or custom keys specified by *buf_key* and *wpos_key*).
     It is initialized to zeros on first call, so the first few blocks of
     reflected output will ramp in from silence as the buffer primes --
     this is standard delay-line behaviour.
@@ -399,15 +439,16 @@ def _delay_line_process(
         Persistent per-source state dict (mutated in place).
     n_frames : int
         Block length in samples.
+    buf_key : str
+        Key in *filter_state* for the delay buffer array.
+    wpos_key : str
+        Key in *filter_state* for the integer write head position.
 
     Returns
     -------
     np.ndarray
         Delayed mono block, shape ``(n_frames,)``, dtype float32.
     """
-    buf_key = "reflection_delay_buf"
-    wpos_key = "reflection_delay_write_pos"
-
     # Allocate on first use.  Size = max delay + generous block padding.
     if buf_key not in filter_state:
         buf_size = _MAX_DELAY_SAMPLES + max(n_frames, 2048)
@@ -446,11 +487,14 @@ def process_block(
 ) -> np.ndarray:                      # (n_frames, 2) stereo float32
     """Transform a mono source block into a stereo output block.
 
-    Produces independently processed arrivals (primary, reflected, and
-    through-wall transmission) whose panned stereo contributions are summed
-    into the returned output.  Transmission contributes whenever the direct
-    source-listener line crosses walls, independently of whether a routed
-    path exists (present in both open and totally-occluded layouts).
+    Produces independently processed arrivals (primary, reflected,
+    through-wall transmission, and discrete echo) whose panned stereo
+    contributions are summed into the returned output.  Transmission
+    contributes whenever the direct source-listener line crosses walls, and
+    up to _MAX_SIMULTANEOUS_ECHOES discrete echo arrivals (Family C)
+    contribute whenever reflector candidates are cached, both independently
+    of whether a routed path exists (present in both open and totally-occluded
+    layouts).
 
     Parameters
     ----------
@@ -465,11 +509,13 @@ def process_block(
         Audio sample rate in Hz.
     filter_state : dict
         Mutable dict persisted across calls for this source.  Used to
-        store the reflection delay buffer state:
+        store the reflection and echo delay buffer states:
           - ``"reflection_delay_buf"`` : np.ndarray -- circular buffer
           - ``"reflection_delay_write_pos"`` : int -- write head position
+          - ``"echo_delay_buf_{i}"`` : np.ndarray -- circular buffer for echo slot i (0..3)
+          - ``"echo_delay_write_pos_{i}"`` : int -- write head position for echo slot i (0..3)
         These keys are created automatically on first call where a
-        reflected arrival exists.  Callers should continue passing the
+        reflected or echo arrival exists.  Callers should continue passing the
         same dict instance across calls as before.
     wall_gains : dict or None
         Optional mapping of wall positions to their reflectivity gain
@@ -558,6 +604,40 @@ def process_block(
             trans_mono *= trans_gain
             out[:, 0] += trans_mono * left_gain
             out[:, 1] += trans_mono * right_gain
+
+        # === DISCRETE ECHO ARRIVALS (Family C, up to _MAX_SIMULTANEOUS_ECHOES) =
+        candidates = filter_state.get("_geom_cache_reflector_candidates") or []
+        for i in range(_MAX_SIMULTANEOUS_ECHOES):
+            buf_key = f"echo_delay_buf_{i}"
+            wpos_key = f"echo_delay_write_pos_{i}"
+            if i < len(candidates):
+                echo_candidate = candidates[i]
+                echo_mono = input_block.astype(np.float32, copy=True)
+                echo_cutoff = _echo_cutoff_hz(echo_candidate)
+                if echo_cutoff < nyquist:
+                    echo_mono = _fft_lowpass(echo_mono, echo_cutoff, sample_rate)
+                echo_mono *= _echo_gain(echo_candidate)
+                round_trip_samples = int(round(
+                    2.0 * echo_candidate.distance_to_wall * _SAMPLES_PER_GRID_UNIT
+                ))
+                delay_samples = max(0, min(round_trip_samples, _MAX_DELAY_SAMPLES))
+                echo_delayed = _delay_line_process(
+                    echo_mono, delay_samples, filter_state, n_frames,
+                    buf_key=buf_key, wpos_key=wpos_key,
+                )
+                dx_echo = echo_candidate.wall_cell[0] - listener_pos[0]
+                pan = np.clip(dx_echo / max_offset, -1.0, 1.0)
+                echo_right = 0.5 * (1.0 + pan)
+                echo_left = 0.5 * (1.0 - pan)
+                out[:, 0] += echo_delayed * echo_left
+                out[:, 1] += echo_delayed * echo_right
+            else:
+                if buf_key in filter_state:
+                    _delay_line_process(
+                        np.zeros(n_frames, dtype=np.float32),
+                        0, filter_state, n_frames,
+                        buf_key=buf_key, wpos_key=wpos_key,
+                    )
 
         return out
 
@@ -704,5 +784,39 @@ def process_block(
         trans_mono *= trans_gain
         out[:, 0] += trans_mono * primary_left
         out[:, 1] += trans_mono * primary_right
+
+    # === DISCRETE ECHO ARRIVALS (Family C, up to _MAX_SIMULTANEOUS_ECHOES) =
+    candidates = filter_state.get("_geom_cache_reflector_candidates") or []
+    for i in range(_MAX_SIMULTANEOUS_ECHOES):
+        buf_key = f"echo_delay_buf_{i}"
+        wpos_key = f"echo_delay_write_pos_{i}"
+        if i < len(candidates):
+            echo_candidate = candidates[i]
+            echo_mono = input_block.astype(np.float32, copy=True)
+            echo_cutoff = _echo_cutoff_hz(echo_candidate)
+            if echo_cutoff < nyquist:
+                echo_mono = _fft_lowpass(echo_mono, echo_cutoff, sample_rate)
+            echo_mono *= _echo_gain(echo_candidate)
+            round_trip_samples = int(round(
+                2.0 * echo_candidate.distance_to_wall * _SAMPLES_PER_GRID_UNIT
+            ))
+            delay_samples = max(0, min(round_trip_samples, _MAX_DELAY_SAMPLES))
+            echo_delayed = _delay_line_process(
+                echo_mono, delay_samples, filter_state, n_frames,
+                buf_key=buf_key, wpos_key=wpos_key,
+            )
+            dx_echo = echo_candidate.wall_cell[0] - listener_pos[0]
+            pan = np.clip(dx_echo / max_offset, -1.0, 1.0)
+            echo_right = 0.5 * (1.0 + pan)
+            echo_left = 0.5 * (1.0 - pan)
+            out[:, 0] += echo_delayed * echo_left
+            out[:, 1] += echo_delayed * echo_right
+        else:
+            if buf_key in filter_state:
+                _delay_line_process(
+                    np.zeros(n_frames, dtype=np.float32),
+                    0, filter_state, n_frames,
+                    buf_key=buf_key, wpos_key=wpos_key,
+                )
 
     return out

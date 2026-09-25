@@ -77,11 +77,11 @@ def test_direct_los() -> None:
     _pf("no inf", not np.any(np.isinf(output)))
 
     # Primary arrival single-path baselines:
-    # gain = 1/(1 + 0.15*5) = 1/1.75 ~ 0.5714
+    # gain = 1/(1 + 0.08*5) = 1/1.4 ~ 0.7143
     # dx=5, pan=5/20=0.25 -> left_gain=0.375, right_gain=0.625
-    primary_gain = 1.0 / (1.0 + 0.15 * 5.0)
-    single_left = 0.5 * primary_gain * 0.375   # ~0.1071
-    single_right = 0.5 * primary_gain * 0.625  # ~0.1786
+    primary_gain = 1.0 / (1.0 + 0.08 * 5.0)
+    single_left = 0.5 * primary_gain * 0.375   # ~0.1339
+    single_right = 0.5 * primary_gain * 0.625  # ~0.2232
 
     left_peak = float(np.max(np.abs(output[:, 0])))
     right_peak = float(np.max(np.abs(output[:, 1])))
@@ -578,7 +578,7 @@ def test_transmission_factor_stacks_correctly() -> None:
     print("\n--- Test: transmission -- factor stacking ---")
     src = (0.0, 0.0)
     lst = (10.0, 0.0)
-    # distance_gain = 1/(1+0.15*10) = 1/2.5 = 0.4 for all cases
+    # distance_gain = 1/(1+0.08*10) = 1/1.8 ~ 0.5556 for all cases
 
     two_curtains = [((3, 0), 0.25), ((6, 0), 0.25)]  # product = 0.75*0.75 = 0.5625
     one_concrete = [((5, 0), 0.90)]                    # product = 0.10
@@ -594,11 +594,11 @@ def test_transmission_factor_stacks_correctly() -> None:
         g_2c > g_1r, f"2curtain={g_2c:.6f} > 1concrete={g_1r:.6f}")
     _pf("mixed (concrete+curtain) < single curtain alone",
         g_mx < g_1c, f"mixed={g_mx:.6f} < 1curtain={g_1c:.6f}")
-    # Verify exact values: distance_gain=0.4
+    # Verify exact values: distance_gain = 1.0 / 1.8
     _pf("two curtains value correct",
-        abs(g_2c - 0.4 * 0.5625) < 1e-9, f"got {g_2c:.9f}, expected {0.4*0.5625:.9f}")
+        abs(g_2c - (1.0 / 1.8) * 0.5625) < 1e-9, f"got {g_2c:.9f}, expected {((1.0 / 1.8) * 0.5625):.9f}")
     _pf("one concrete value correct",
-        abs(g_1r - 0.4 * 0.10) < 1e-9, f"got {g_1r:.9f}, expected {0.4*0.10:.9f}")
+        abs(g_1r - (1.0 / 1.8) * 0.10) < 1e-9, f"got {g_1r:.9f}, expected {((1.0 / 1.8) * 0.10):.9f}")
 
 
 def test_transmission_cutoff_steeper_with_more_walls() -> None:

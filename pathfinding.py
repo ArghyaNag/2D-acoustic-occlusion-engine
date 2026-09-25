@@ -506,9 +506,9 @@ def find_reflector_candidates(
 
     # Sort by predicted echo loudness, descending.
     # loudness = distance_gain(2 * dist) * material_gain
-    # distance_gain(d) = 1.0 / (1.0 + 0.15 * d)   — exact current formula
+    # distance_gain(d) = 1.0 / (1.0 + 0.08 * d)   — exact current formula
     def _loudness(c: ReflectorCandidate) -> float:
-        return (1.0 / (1.0 + 0.15 * 2.0 * c.distance_to_wall)) * c.material_gain
+        return (1.0 / (1.0 + 0.08 * 2.0 * c.distance_to_wall)) * c.material_gain
 
     candidates.sort(key=_loudness, reverse=True)
     return candidates[:max_candidates]

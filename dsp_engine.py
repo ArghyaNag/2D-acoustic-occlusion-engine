@@ -66,7 +66,7 @@ FFT filtering approach -- per-block with smooth taper, no overlap:
 
 Tunable constants (all empirical -- adjust by ear, not derived from any
 acoustic model, matching the existing convention in this file where the
-0.15 distance-gain constant and 20.0 max_offset pan constant were also
+0.08 distance-gain constant and 20.0 max_offset pan constant were also
 documented as empirical / tunable):
   _TOTAL_OCCLUSION_FLOOR_GAIN  -- gain when no path exists (~-34 dB)
   _BASE_CUTOFF_HZ              -- lowpass cutoff at 0 corners (direct LoS)
@@ -227,7 +227,7 @@ def _transmission_gain(
     dx = source_pos[0] - listener_pos[0]
     dy = source_pos[1] - listener_pos[1]
     dist = math.sqrt(dx * dx + dy * dy)
-    distance_gain = 1.0 / (1.0 + 0.15 * dist)
+    distance_gain = 1.0 / (1.0 + 0.08 * dist)
 
     transmission_product = 1.0
     for _, material_gain in transmission_path:
@@ -579,7 +579,7 @@ def process_block(
         primary_mono = _fft_lowpass(primary_mono, primary_cutoff, sample_rate)
 
     # Path-length distance gain
-    primary_gain = 1.0 / (1.0 + 0.15 * primary_path.length)
+    primary_gain = 1.0 / (1.0 + 0.08 * primary_path.length)
     primary_mono *= primary_gain
 
     # Pan (straight-line x-offset, unchanged from single-arrival behavior)
@@ -605,7 +605,7 @@ def process_block(
             ref_mono = _fft_lowpass(ref_mono, ref_cutoff, sample_rate)
 
         # -- Distance gain ------------------------------------------------
-        ref_gain_val = 1.0 / (1.0 + 0.15 * ref_path.length)
+        ref_gain_val = 1.0 / (1.0 + 0.08 * ref_path.length)
         ref_mono = ref_mono * ref_gain_val  # new array (avoids aliasing mono)
 
         # -- Material gain (per-corner reflectivity) ----------------------

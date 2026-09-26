@@ -17,6 +17,7 @@ from __future__ import annotations
 from time import thread_time
 
 
+import math
 import os
 import sys
 from typing import Optional
@@ -53,28 +54,69 @@ WINDOW_W: int = LEFT_SIDEBAR_W + GRID_W + RIGHT_SIDEBAR_W
 WINDOW_H: int = GRID_H
 
 # ---------------------------------------------------------------------------
-# Colour palette
+# Design tokens — spacing & corner radius
 # ---------------------------------------------------------------------------
-COL_BG          = (24, 24, 30)
-COL_SIDEBAR_BG  = (30, 30, 38)
-COL_GRID_LINE   = (50, 50, 60)
-COL_WALL        = (70, 70, 80)
-COL_LISTENER    = (70, 140, 255)
-COL_SOURCE      = (255, 160, 50)
-COL_SOURCE_SEL  = (255, 220, 80)
-COL_TEXT        = (210, 210, 220)
-COL_TEXT_DIM    = (130, 130, 145)
-COL_BUTTON      = (55, 55, 70)
-COL_BUTTON_ACT  = (80, 100, 180)
-COL_GRAPH_BG    = (20, 20, 28)
-COL_GRAPH_RAW   = (100, 200, 100)
-COL_GRAPH_PROC  = (100, 160, 255)
+SPACE_XS: int = 4
+SPACE_SM: int = 8
+SPACE_MD: int = 16
+SPACE_LG: int = 24
+CORNER_RADIUS: int = 8
+
+# ---------------------------------------------------------------------------
+# Font family fallback strings (pygame.font.SysFont accepts comma-joined)
+# ---------------------------------------------------------------------------
+_FONT_UI = "Segoe UI,Helvetica Neue,Arial"
+_FONT_MONO = "Cascadia Mono,Consolas"
+
+# ---------------------------------------------------------------------------
+# Colour palette — layered background system + accent + text hierarchy
+# ---------------------------------------------------------------------------
+# Background layers (each visibly distinct)
+COL_BG_BASE       = (18, 18, 24)     # darkest — window/grid background
+COL_BG_SURFACE    = (28, 29, 38)     # sidebar background
+COL_BG_CARD       = (42, 44, 58)     # button/card/panel fill
+COL_BG_CARD_HOVER = (58, 62, 82)     # hover/active state for cards
+
+# Accent colour (blue family, consistent for all "active/on/selected" states)
+COL_ACCENT        = (80, 110, 200)
+COL_ACCENT_BRIGHT = (100, 140, 240)
+
+# Text hierarchy
+COL_TEXT_PRIMARY   = (235, 235, 245)  # titles, important labels
+COL_TEXT_SECONDARY = (190, 192, 205)  # normal labels
+COL_TEXT_DIM       = (120, 124, 140)  # captions, file names
+
+# Subtle border for cards/panels (1 px, slightly lighter than card fill)
+COL_BORDER         = (60, 63, 78)
+
+# Grid line colour
+COL_GRID_LINE      = (40, 42, 52)
+
+# Fallback wall colour (unrecognised gain value)
+COL_WALL           = (70, 70, 80)
+
+# Semantic colours (preserved from original — verified readable on new bg)
+COL_LISTENER       = (70, 140, 255)
+COL_SOURCE         = (255, 160, 50)
+COL_SOURCE_SEL     = (255, 220, 80)
+COL_GRAPH_BG       = (22, 22, 30)
+COL_GRAPH_RAW      = (100, 200, 100)
+COL_GRAPH_PROC     = (100, 160, 255)
 COL_GRAPH_SPECTRUM = (255, 180, 80)
-COL_PALETTE_LISTENER = (55, 100, 200)
-COL_PALETTE_SOURCE   = (200, 120, 30)
 COL_PATH_PRIMARY      = (50, 200, 180)
 COL_PATH_TRANSMISSION = (255, 140, 0)    # Family B through-wall transmission line
 COL_PATH_ECHO         = (200, 100, 220)  # Family C discrete echo candidate rays & markers
+
+# Palette item accent colours
+COL_PALETTE_LISTENER = (50, 90, 190)
+COL_PALETTE_SOURCE   = (190, 110, 25)
+
+# Status colours
+COL_STATUS_PLAYING = (80, 220, 80)
+COL_STATUS_STOPPED = (180, 60, 60)
+
+# Network info panel
+COL_NET_PANEL      = (30, 65, 50)
 
 # ---------------------------------------------------------------------------
 # Wall material definitions (gain, display color, label)
@@ -115,6 +157,70 @@ def _open_file_dialog() -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Vector icon drawing helpers (replace emoji glyphs with pygame.draw)
+# ---------------------------------------------------------------------------
+def _draw_icon_headphones(surface: pygame.Surface, cx: int, cy: int, size: int, color: tuple) -> None:
+    """Draw a simple headphone icon centred at (cx, cy)."""
+    r = size // 2
+    # Headband arc (top semicircle)
+    band_rect = pygame.Rect(cx - r, cy - r, 2 * r, 2 * r)
+    pygame.draw.arc(surface, color, band_rect, math.radians(20), math.radians(160), 2)
+    # Left earpiece
+    ear_w, ear_h = max(2, r // 2), max(3, r)
+    pygame.draw.rect(surface, color, (cx - r - 1, cy - ear_h // 3, ear_w, ear_h), border_radius=2)
+    # Right earpiece
+    pygame.draw.rect(surface, color, (cx + r - ear_w + 1, cy - ear_h // 3, ear_w, ear_h), border_radius=2)
+
+
+def _draw_icon_speaker(surface: pygame.Surface, cx: int, cy: int, size: int, color: tuple) -> None:
+    """Draw a simple speaker cone icon centred at (cx, cy)."""
+    r = size // 2
+    # Speaker body (small rect on the left)
+    body_w = max(2, r // 2)
+    body_h = max(3, r)
+    bx = cx - r
+    by = cy - body_h // 2
+    pygame.draw.rect(surface, color, (bx, by, body_w, body_h))
+    # Cone (trapezoid/triangle pointing right)
+    cone_pts = [
+        (bx + body_w, cy - body_h // 2),
+        (cx + r, cy - r),
+        (cx + r, cy + r),
+        (bx + body_w, cy + body_h // 2),
+    ]
+    pygame.draw.polygon(surface, color, cone_pts)
+
+
+def _draw_icon_play(surface: pygame.Surface, cx: int, cy: int, size: int, color: tuple) -> None:
+    """Draw a solid right-pointing play triangle centred at (cx, cy)."""
+    r = size // 2
+    pts = [
+        (cx - r // 2, cy - r),
+        (cx + r, cy),
+        (cx - r // 2, cy + r),
+    ]
+    pygame.draw.polygon(surface, color, pts)
+
+
+def _draw_icon_pause(surface: pygame.Surface, cx: int, cy: int, size: int, color: tuple) -> None:
+    """Draw two vertical pause bars centred at (cx, cy)."""
+    r = size // 2
+    bar_w = max(2, r // 2)
+    gap = max(2, r // 2)
+    bar_h = size
+    # Left bar
+    pygame.draw.rect(surface, color, (cx - gap - bar_w, cy - r, bar_w, bar_h))
+    # Right bar
+    pygame.draw.rect(surface, color, (cx + gap, cy - r, bar_w, bar_h))
+
+
+def _draw_icon_stop(surface: pygame.Surface, cx: int, cy: int, size: int, color: tuple) -> None:
+    """Draw a filled square stop icon centred at (cx, cy)."""
+    r = size // 2
+    pygame.draw.rect(surface, color, (cx - r, cy - r, size, size))
+
+
+# ---------------------------------------------------------------------------
 # Wall tool modes
 # ---------------------------------------------------------------------------
 WALL_OFF  = 0
@@ -141,12 +247,17 @@ class RenderEngine:
         # FIX 2: Subtract margin so window has visible title bar and chrome
         window_w = info.current_w - 100
         window_h = info.current_h - 100
-        self._screen = pygame.display.set_mode((window_w, window_h), pygame.RESIZABLE)
+        self._screen = pygame.display.set_mode(
+            (window_w, window_h), pygame.RESIZABLE | pygame.DOUBLEBUF
+        )
 
         self._clock = pygame.time.Clock()
-        self._font = pygame.font.SysFont("consolas", 14)
-        self._font_sm = pygame.font.SysFont("consolas", 12)
-        self._font_lg = pygame.font.SysFont("consolas", 16, bold=True)
+
+        # ---- Typography (Part 2) ----
+        self._font_title = pygame.font.SysFont(_FONT_UI, 20, bold=True)
+        self._font_label = pygame.font.SysFont(_FONT_UI, 14)
+        self._font_small = pygame.font.SysFont(_FONT_UI, 12)
+        self._font_mono  = pygame.font.SysFont(_FONT_MONO, 12)
 
         # FIX 1: Dynamic cell size attribute
         self._cell_size: int = CELL_SIZE_PX
@@ -209,7 +320,7 @@ class RenderEngine:
         grid_draw_h = GRID_ROWS * self._cell_size
 
         # Background
-        pygame.draw.rect(self._screen, COL_BG, (ox, oy, grid_draw_w, grid_draw_h))
+        pygame.draw.rect(self._screen, COL_BG_BASE, (ox, oy, grid_draw_w, grid_draw_h))
 
         # Vertical lines
         for c in range(GRID_COLS + 1):
@@ -247,12 +358,12 @@ class RenderEngine:
         # Forward-axis indicator (small line pointing +x)
         pygame.draw.line(
             self._screen,
-            (200, 220, 255),
+            COL_ACCENT_BRIGHT,
             (cx, cy),
             (cx + self._cell_size // 2 + 2, cy),
             2,
         )
-        label = self._font_sm.render("L", True, (255, 255, 255))
+        label = self._font_small.render("L", True, COL_TEXT_PRIMARY)
         self._screen.blit(label, (cx - label.get_width() // 2, cy - label.get_height() // 2))
 
     def _draw_sources(self) -> None:
@@ -262,7 +373,7 @@ class RenderEngine:
             col = COL_SOURCE_SEL if sid == self._selected_source_id else COL_SOURCE
             radius = max(2, self._cell_size // 2 - 2)
             pygame.draw.circle(self._screen, col, (px, py), radius)
-            label = self._font_sm.render(f"S{sid}", True, (0, 0, 0))
+            label = self._font_small.render(f"S{sid}", True, (0, 0, 0))
             self._screen.blit(label, (px - label.get_width() // 2, py - label.get_height() // 2))
 
     # ------------------------------------------------------------------
@@ -361,73 +472,97 @@ class RenderEngine:
                 )
 
     # ------------------------------------------------------------------
+    # Sidebar drawing helper: card with border
+    # ------------------------------------------------------------------
+    def _draw_card(self, rect: pygame.Rect, fill: tuple, border: tuple = COL_BORDER) -> None:
+        """Draw a rounded-rect card with fill and 1px border."""
+        pygame.draw.rect(self._screen, fill, rect, border_radius=CORNER_RADIUS)
+        pygame.draw.rect(self._screen, border, rect, width=1, border_radius=CORNER_RADIUS)
+
+    # ------------------------------------------------------------------
     # Left sidebar
     # ------------------------------------------------------------------
     def _draw_left_sidebar(self) -> None:
         win_h = self._screen.get_height()
         sidebar_rect = pygame.Rect(0, 0, LEFT_SIDEBAR_W, win_h)
-        pygame.draw.rect(self._screen, COL_SIDEBAR_BG, sidebar_rect)
+        pygame.draw.rect(self._screen, COL_BG_SURFACE, sidebar_rect)
 
-        y = 12
+        pad = SPACE_MD  # horizontal padding from sidebar edge
+        content_w = LEFT_SIDEBAR_W - 2 * pad
+        y = SPACE_MD
+
         # Title
-        title = self._font_lg.render("PALETTE", True, COL_TEXT)
-        self._screen.blit(title, (16, y)); y += 28
+        title = self._font_title.render("PALETTE", True, COL_TEXT_PRIMARY)
+        self._screen.blit(title, (pad, y))
+        y += title.get_height() + SPACE_SM
 
         # ---- Listener palette item ----
-        self._listener_palette_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 36)
-        pygame.draw.rect(self._screen, COL_PALETTE_LISTENER, self._listener_palette_rect, border_radius=6)
-        lt = self._font.render("🎧  Listener", True, (255, 255, 255))
-        self._screen.blit(lt, (self._listener_palette_rect.x + 10, self._listener_palette_rect.y + 9))
-        y += 46
+        item_h = 36
+        self._listener_palette_rect = pygame.Rect(pad, y, content_w, item_h)
+        self._draw_card(self._listener_palette_rect, COL_PALETTE_LISTENER)
+        # Icon
+        icon_cx = self._listener_palette_rect.x + SPACE_MD + 6
+        icon_cy = self._listener_palette_rect.y + item_h // 2
+        _draw_icon_headphones(self._screen, icon_cx, icon_cy, 14, COL_TEXT_PRIMARY)
+        # Label
+        lt = self._font_label.render("Listener", True, COL_TEXT_PRIMARY)
+        self._screen.blit(lt, (icon_cx + 14, self._listener_palette_rect.y + (item_h - lt.get_height()) // 2))
+        y += item_h + SPACE_SM
 
         # ---- Source palette item ----
-        self._source_palette_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 36)
-        pygame.draw.rect(self._screen, COL_PALETTE_SOURCE, self._source_palette_rect, border_radius=6)
-        st = self._font.render("🔊  Source", True, (255, 255, 255))
-        self._screen.blit(st, (self._source_palette_rect.x + 10, self._source_palette_rect.y + 9))
-        y += 56
+        self._source_palette_rect = pygame.Rect(pad, y, content_w, item_h)
+        self._draw_card(self._source_palette_rect, COL_PALETTE_SOURCE)
+        # Icon
+        icon_cx = self._source_palette_rect.x + SPACE_MD + 6
+        icon_cy = self._source_palette_rect.y + item_h // 2
+        _draw_icon_speaker(self._screen, icon_cx, icon_cy, 14, COL_TEXT_PRIMARY)
+        # Label
+        st = self._font_label.render("Source", True, COL_TEXT_PRIMARY)
+        self._screen.blit(st, (icon_cx + 14, self._source_palette_rect.y + (item_h - st.get_height()) // 2))
+        y += item_h + SPACE_MD
 
         # ---- Wall tool toggle ----
-        self._wall_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 32)
-        btn_col = COL_BUTTON_ACT if self._wall_tool != WALL_OFF else COL_BUTTON
-        pygame.draw.rect(self._screen, btn_col, self._wall_btn_rect, border_radius=6)
-        wt = self._font.render(WALL_LABELS[self._wall_tool], True, COL_TEXT)
-        self._screen.blit(wt, (self._wall_btn_rect.x + 10, self._wall_btn_rect.y + 7))
-        y += 42
+        btn_h = 32
+        self._wall_btn_rect = pygame.Rect(pad, y, content_w, btn_h)
+        btn_fill = COL_ACCENT if self._wall_tool != WALL_OFF else COL_BG_CARD
+        self._draw_card(self._wall_btn_rect, btn_fill)
+        wt = self._font_label.render(WALL_LABELS[self._wall_tool], True, COL_TEXT_PRIMARY)
+        self._screen.blit(wt, (self._wall_btn_rect.x + SPACE_SM + 2, self._wall_btn_rect.y + (btn_h - wt.get_height()) // 2))
+        y += btn_h + SPACE_SM
 
         # ---- Material swatches (only visible in DRAW mode) ----
         self._mat_swatch_rects = []
         if self._wall_tool == WALL_DRAW:
-            swatch_label = self._font_sm.render("Material:", True, COL_TEXT_DIM)
-            self._screen.blit(swatch_label, (16, y))
-            y += 16
-            swatch_w = (LEFT_SIDEBAR_W - 32)
+            swatch_label = self._font_small.render("Material:", True, COL_TEXT_DIM)
+            self._screen.blit(swatch_label, (pad, y))
+            y += swatch_label.get_height() + SPACE_XS
             swatch_h = 26
             for mat in _WALL_MATERIALS:
-                rect = pygame.Rect(16, y, swatch_w, swatch_h)
+                rect = pygame.Rect(pad, y, content_w, swatch_h)
                 self._mat_swatch_rects.append(rect)
                 # Highlight if this material is selected
                 is_selected = (mat["gain"] == self._wall_material)
-                border_col = (255, 255, 255) if is_selected else (80, 80, 95)
-                pygame.draw.rect(self._screen, mat["color"], rect, border_radius=5)
-                pygame.draw.rect(self._screen, border_col, rect, width=2, border_radius=5)
-                lbl = self._font_sm.render(mat["label"], True, (20, 20, 20))
-                self._screen.blit(lbl, (rect.x + 7, rect.y + 5))
-                y += swatch_h + 4
-            y += 6  # small gap below swatches
+                border_col = COL_ACCENT_BRIGHT if is_selected else COL_BORDER
+                pygame.draw.rect(self._screen, mat["color"], rect, border_radius=CORNER_RADIUS)
+                pygame.draw.rect(self._screen, border_col, rect, width=2, border_radius=CORNER_RADIUS)
+                lbl = self._font_small.render(mat["label"], True, (20, 20, 20))
+                self._screen.blit(lbl, (rect.x + SPACE_SM, rect.y + (swatch_h - lbl.get_height()) // 2))
+                y += swatch_h + SPACE_XS
+            y += SPACE_SM
         else:
-            y += 6  # same gap so layout below is stable
+            y += SPACE_SM
 
         # ---- Separator ----
-        pygame.draw.line(self._screen, COL_GRID_LINE, (16, y), (LEFT_SIDEBAR_W - 16, y))
-        y += 12
+        pygame.draw.line(self._screen, COL_GRID_LINE, (pad, y), (LEFT_SIDEBAR_W - pad, y))
+        y += SPACE_MD
 
         # ---- Selected source panel ----
         if self._selected_source_id is not None:
             src = self._state.get_source(self._selected_source_id)
             if src is not None:
-                header = self._font_lg.render(f"Source {self._selected_source_id}", True, COL_SOURCE_SEL)
-                self._screen.blit(header, (16, y)); y += 24
+                header = self._font_title.render(f"Source {self._selected_source_id}", True, COL_SOURCE_SEL)
+                self._screen.blit(header, (pad, y))
+                y += header.get_height() + SPACE_SM
 
                 input_mode = src.get("input_mode", "file")
                 is_mic = (input_mode == "mic")
@@ -436,23 +571,29 @@ class RenderEngine:
                 if is_network:
                     # Network sources are auto-managed — show read-only label,
                     # hide all manual controls.
-                    net_label_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
-                    pygame.draw.rect(self._screen, (40, 80, 60), net_label_rect, border_radius=6)
+                    net_label_rect = pygame.Rect(pad, y, content_w, 28)
+                    self._draw_card(net_label_rect, COL_NET_PANEL)
                     net_client = src.get("network_client")
                     if net_client:
                         nl_text = f"Net: {net_client[0]}:{net_client[1]}"
                     else:
                         nl_text = "Input: Network (auto)"
-                    nl = self._font.render(nl_text, True, COL_TEXT)
-                    self._screen.blit(nl, (net_label_rect.x + 10, net_label_rect.y + 5))
-                    y += 38
+                    nl = self._font_mono.render(nl_text, True, COL_TEXT_SECONDARY)
+                    self._screen.blit(nl, (net_label_rect.x + SPACE_SM, net_label_rect.y + (28 - nl.get_height()) // 2))
+                    y += 28 + SPACE_SM
 
                     # Playing indicator (always playing for network sources)
                     playing = src.get("playing", False)
-                    status_col = (80, 220, 80) if playing else (180, 60, 60)
-                    status_text = "▶ Playing" if playing else "■ Stopped"
-                    st = self._font.render(status_text, True, status_col)
-                    self._screen.blit(st, (16, y)); y += 24
+                    status_col = COL_STATUS_PLAYING if playing else COL_STATUS_STOPPED
+                    icon_y = y + 3
+                    if playing:
+                        _draw_icon_play(self._screen, pad + 6, icon_y + 5, 8, status_col)
+                    else:
+                        _draw_icon_stop(self._screen, pad + 6, icon_y + 5, 8, status_col)
+                    status_text = "Playing" if playing else "Stopped"
+                    st_surf = self._font_label.render(status_text, True, status_col)
+                    self._screen.blit(st_surf, (pad + 18, y))
+                    y += st_surf.get_height() + SPACE_SM
 
                     # No other controls for network sources.
                     self._input_mode_btn_rect = None
@@ -461,38 +602,42 @@ class RenderEngine:
                     self._pause_btn_rect = None
                 else:
                     # Input mode toggle button (file ↔ mic only)
-                    self._input_mode_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
-                    mode_col = COL_BUTTON_ACT if is_mic else COL_BUTTON
-                    pygame.draw.rect(self._screen, mode_col, self._input_mode_btn_rect, border_radius=6)
+                    mode_btn_h = 28
+                    self._input_mode_btn_rect = pygame.Rect(pad, y, content_w, mode_btn_h)
+                    mode_fill = COL_ACCENT if is_mic else COL_BG_CARD
+                    self._draw_card(self._input_mode_btn_rect, mode_fill)
                     mode_label = "Input: Mic" if is_mic else "Input: File"
-                    ml = self._font.render(mode_label, True, COL_TEXT)
-                    self._screen.blit(ml, (self._input_mode_btn_rect.x + 10, self._input_mode_btn_rect.y + 5))
-                    y += 38
+                    ml = self._font_label.render(mode_label, True, COL_TEXT_PRIMARY)
+                    self._screen.blit(ml, (self._input_mode_btn_rect.x + SPACE_SM + 2, self._input_mode_btn_rect.y + (mode_btn_h - ml.get_height()) // 2))
+                    y += mode_btn_h + SPACE_SM
 
                 if not is_network:
                     if not is_mic:
                         # File name
                         ap = src.get("audio_path")
                         fname = os.path.basename(ap) if ap else "No file"
-                        ft = self._font_sm.render(fname, True, COL_TEXT_DIM)
-                        self._screen.blit(ft, (16, y)); y += 20
+                        ft = self._font_small.render(fname, True, COL_TEXT_DIM)
+                        self._screen.blit(ft, (pad, y))
+                        y += ft.get_height() + SPACE_XS
 
                         # Load audio button
-                        self._load_audio_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 30)
-                        pygame.draw.rect(self._screen, COL_BUTTON, self._load_audio_btn_rect, border_radius=6)
-                        la = self._font.render("Load Audio File", True, COL_TEXT)
-                        self._screen.blit(la, (self._load_audio_btn_rect.x + 10, self._load_audio_btn_rect.y + 6))
-                        y += 40
+                        load_btn_h = 30
+                        self._load_audio_btn_rect = pygame.Rect(pad, y, content_w, load_btn_h)
+                        self._draw_card(self._load_audio_btn_rect, COL_BG_CARD)
+                        la = self._font_label.render("Load Audio File", True, COL_TEXT_SECONDARY)
+                        self._screen.blit(la, (self._load_audio_btn_rect.x + SPACE_SM + 2, self._load_audio_btn_rect.y + (load_btn_h - la.get_height()) // 2))
+                        y += load_btn_h + SPACE_SM
 
                         # Loop toggle
                         loop_on = src.get("loop", False)
-                        self._loop_toggle_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
-                        loop_col = COL_BUTTON_ACT if loop_on else COL_BUTTON
-                        pygame.draw.rect(self._screen, loop_col, self._loop_toggle_rect, border_radius=6)
+                        loop_btn_h = 28
+                        self._loop_toggle_rect = pygame.Rect(pad, y, content_w, loop_btn_h)
+                        loop_fill = COL_ACCENT if loop_on else COL_BG_CARD
+                        self._draw_card(self._loop_toggle_rect, loop_fill)
                         loop_label = "Loop: ON" if loop_on else "Loop: OFF"
-                        ll = self._font.render(loop_label, True, COL_TEXT)
-                        self._screen.blit(ll, (self._loop_toggle_rect.x + 10, self._loop_toggle_rect.y + 5))
-                        y += 38
+                        ll = self._font_label.render(loop_label, True, COL_TEXT_PRIMARY)
+                        self._screen.blit(ll, (self._loop_toggle_rect.x + SPACE_SM + 2, self._loop_toggle_rect.y + (loop_btn_h - ll.get_height()) // 2))
+                        y += loop_btn_h + SPACE_SM
                     else:
                         ap = src.get("audio_path")
                         self._load_audio_btn_rect = None
@@ -503,22 +648,36 @@ class RenderEngine:
                     show_pause = is_mic or src.get("audio_path")
                     if show_pause:
                         playing = src.get("playing", False)
-                        self._pause_btn_rect = pygame.Rect(16, y, LEFT_SIDEBAR_W - 32, 28)
-                        pause_col = COL_BUTTON_ACT if playing else COL_BUTTON
-                        pygame.draw.rect(self._screen, pause_col, self._pause_btn_rect, border_radius=6)
-                        pause_label = "⏸ Pause" if playing else "▶ Play"
-                        pl = self._font.render(pause_label, True, COL_TEXT)
-                        self._screen.blit(pl, (self._pause_btn_rect.x + 10, self._pause_btn_rect.y + 5))
-                        y += 38
+                        pause_btn_h = 28
+                        self._pause_btn_rect = pygame.Rect(pad, y, content_w, pause_btn_h)
+                        pause_fill = COL_ACCENT if playing else COL_BG_CARD
+                        self._draw_card(self._pause_btn_rect, pause_fill)
+                        # Icon
+                        icon_cx = self._pause_btn_rect.x + SPACE_SM + 6
+                        icon_cy = self._pause_btn_rect.y + pause_btn_h // 2
+                        if playing:
+                            _draw_icon_pause(self._screen, icon_cx, icon_cy, 10, COL_TEXT_PRIMARY)
+                        else:
+                            _draw_icon_play(self._screen, icon_cx, icon_cy, 10, COL_TEXT_PRIMARY)
+                        pause_label = "Pause" if playing else "Play"
+                        pl = self._font_label.render(pause_label, True, COL_TEXT_PRIMARY)
+                        self._screen.blit(pl, (icon_cx + 14, self._pause_btn_rect.y + (pause_btn_h - pl.get_height()) // 2))
+                        y += pause_btn_h + SPACE_SM
                     else:
                         self._pause_btn_rect = None
 
                     # Playing indicator
                     playing = src.get("playing", False)
-                    status_col = (80, 220, 80) if playing else (180, 60, 60)
-                    status_text = "▶ Playing" if playing else "■ Stopped"
-                    st = self._font.render(status_text, True, status_col)
-                    self._screen.blit(st, (16, y)); y += 24
+                    status_col = COL_STATUS_PLAYING if playing else COL_STATUS_STOPPED
+                    icon_y = y + 3
+                    if playing:
+                        _draw_icon_play(self._screen, pad + 6, icon_y + 5, 8, status_col)
+                    else:
+                        _draw_icon_stop(self._screen, pad + 6, icon_y + 5, 8, status_col)
+                    status_text = "Playing" if playing else "Stopped"
+                    st_surf = self._font_label.render(status_text, True, status_col)
+                    self._screen.blit(st_surf, (pad + 18, y))
+                    y += st_surf.get_height() + SPACE_SM
             else:
                 self._selected_source_id = None
                 self._load_audio_btn_rect = None
@@ -540,33 +699,40 @@ class RenderEngine:
         win_w, win_h = self._screen.get_size()
         right_sidebar_w = max(RIGHT_SIDEBAR_W, win_w - rx)
         sidebar_rect = pygame.Rect(rx, 0, right_sidebar_w, win_h)
-        pygame.draw.rect(self._screen, COL_SIDEBAR_BG, sidebar_rect)
+        pygame.draw.rect(self._screen, COL_BG_SURFACE, sidebar_rect)
 
-        y = 12
-        title = self._font_lg.render("WAVEFORMS", True, COL_TEXT)
-        self._screen.blit(title, (rx + 12, y)); y += 28
+        pad = SPACE_MD - 4  # inner padding
+        y = SPACE_MD
+        title = self._font_title.render("WAVEFORMS", True, COL_TEXT_PRIMARY)
+        self._screen.blit(title, (rx + pad, y))
+        y += title.get_height() + SPACE_SM
 
-        graph_w = right_sidebar_w - 24
+        graph_w = right_sidebar_w - 2 * pad
         graph_h = 50
 
-        # ---- FIX 3: FINAL OUTPUT (what you hear) graph at top ----
+        # ---- FINAL OUTPUT (what you hear) graph at top ----
         mix_data = self._audio.get_last_mix()
         if mix_data is not None and mix_data.ndim == 2:
             mix_data = mix_data[:, 0]  # left channel
 
-        mix_rect = pygame.Rect(rx + 12, y + 16, graph_w, graph_h)
-        pygame.draw.rect(self._screen, COL_GRAPH_BG, mix_rect, border_radius=3)
-        pygame.draw.rect(self._screen, (100, 180, 255), mix_rect, width=1, border_radius=3)
-        mix_peak = self._draw_waveform(mix_rect, mix_data, (120, 220, 255), PROCESSED_DISPLAY_MULTIPLIER)
+        mix_label_str = "FINAL OUTPUT (L)"
+        mix_label = self._font_small.render(mix_label_str, True, COL_ACCENT_BRIGHT)
+        self._screen.blit(mix_label, (rx + pad, y))
+        y += mix_label.get_height() + SPACE_XS
 
-        mix_label_str = f"FINAL OUTPUT (L)  peak: {mix_peak:.4f}"
-        mix_label = self._font_sm.render(mix_label_str, True, (150, 220, 255))
-        self._screen.blit(mix_label, (rx + 12, y))
-        y += graph_h + 24
+        mix_rect = pygame.Rect(rx + pad, y, graph_w, graph_h)
+        self._draw_card(mix_rect, COL_GRAPH_BG, COL_ACCENT)
+        mix_peak = self._draw_waveform(mix_rect, mix_data, COL_ACCENT_BRIGHT, PROCESSED_DISPLAY_MULTIPLIER)
+
+        # Peak readout (monospace)
+        peak_str = f"peak: {mix_peak:.4f}"
+        peak_surf = self._font_mono.render(peak_str, True, COL_TEXT_DIM)
+        self._screen.blit(peak_surf, (rx + pad + graph_w - peak_surf.get_width(), y - peak_surf.get_height() - 1))
+        y += graph_h + SPACE_MD
 
         # Separator line
-        pygame.draw.line(self._screen, COL_GRID_LINE, (rx + 12, y), (rx + right_sidebar_w - 12, y))
-        y += 12
+        pygame.draw.line(self._screen, COL_GRID_LINE, (rx + pad, y), (rx + right_sidebar_w - pad, y))
+        y += SPACE_MD
 
         # ---- Per-source graphs ----
         sources = self._state.get_sources()
@@ -574,39 +740,44 @@ class RenderEngine:
             if y + graph_h * 3 + 68 > win_h:
                 break  # no room for more (raw + processed + spectrum)
 
-            label = self._font_sm.render(f"Source {sid}", True, COL_SOURCE)
-            self._screen.blit(label, (rx + 12, y)); y += 18
+            label = self._font_label.render(f"Source {sid}", True, COL_SOURCE)
+            self._screen.blit(label, (rx + pad, y))
+            y += label.get_height() + SPACE_XS
 
             # --- Raw waveform graph ---
-            raw_rect = pygame.Rect(rx + 12, y + 14, graph_w, graph_h)
-            pygame.draw.rect(self._screen, COL_GRAPH_BG, raw_rect, border_radius=3)
+            raw_label = self._font_small.render("raw", True, COL_TEXT_DIM)
+            self._screen.blit(raw_label, (rx + pad, y))
+
+            raw_rect = pygame.Rect(rx + pad, y + raw_label.get_height() + 2, graph_w, graph_h)
+            self._draw_card(raw_rect, COL_GRAPH_BG)
             raw_data = self._audio.get_last_raw(sid)
             raw_peak = self._draw_waveform(raw_rect, raw_data, COL_GRAPH_RAW, RAW_DISPLAY_MULTIPLIER)
 
-            raw_label_str = f"raw  peak: {raw_peak:.4f}"
-            raw_label = self._font_sm.render(raw_label_str, True, COL_TEXT_DIM)
-            self._screen.blit(raw_label, (rx + 12, y))
-            y += graph_h + 18
+            raw_peak_surf = self._font_mono.render(f"peak: {raw_peak:.4f}", True, COL_TEXT_DIM)
+            self._screen.blit(raw_peak_surf, (rx + pad + graph_w - raw_peak_surf.get_width(), y))
+            y += raw_label.get_height() + 2 + graph_h + SPACE_SM
 
             # --- Processed waveform graph (left channel) ---
             proc_data = self._audio.get_last_processed(sid)
             if proc_data is not None and proc_data.ndim == 2:
                 proc_data = proc_data[:, 0]  # left channel only
 
-            proc_rect = pygame.Rect(rx + 12, y + 14, graph_w, graph_h)
-            pygame.draw.rect(self._screen, COL_GRAPH_BG, proc_rect, border_radius=3)
+            proc_label = self._font_small.render("processed (L)", True, COL_TEXT_DIM)
+            self._screen.blit(proc_label, (rx + pad, y))
+
+            proc_rect = pygame.Rect(rx + pad, y + proc_label.get_height() + 2, graph_w, graph_h)
+            self._draw_card(proc_rect, COL_GRAPH_BG)
             proc_peak = self._draw_waveform(proc_rect, proc_data, COL_GRAPH_PROC, PROCESSED_DISPLAY_MULTIPLIER)
 
-            proc_label_str = f"processed (L)  peak: {proc_peak:.4f}"
-            proc_label = self._font_sm.render(proc_label_str, True, COL_TEXT_DIM)
-            self._screen.blit(proc_label, (rx + 12, y))
-            y += graph_h + 18
+            proc_peak_surf = self._font_mono.render(f"peak: {proc_peak:.4f}", True, COL_TEXT_DIM)
+            self._screen.blit(proc_peak_surf, (rx + pad + graph_w - proc_peak_surf.get_width(), y))
+            y += proc_label.get_height() + 2 + graph_h + SPACE_SM
 
             # --- Spectrum bar-graph panel ---
-            spec_label = self._font_sm.render("spectrum", True, COL_TEXT_DIM)
-            self._screen.blit(spec_label, (rx + 12, y))
-            spec_rect = pygame.Rect(rx + 12, y + 14, graph_w, graph_h)
-            pygame.draw.rect(self._screen, COL_GRAPH_BG, spec_rect, border_radius=3)
+            spec_label = self._font_small.render("spectrum", True, COL_TEXT_DIM)
+            self._screen.blit(spec_label, (rx + pad, y))
+            spec_rect = pygame.Rect(rx + pad, y + spec_label.get_height() + 2, graph_w, graph_h)
+            self._draw_card(spec_rect, COL_GRAPH_BG)
 
             bin_centers, magnitudes = compute_spectrum(
                 proc_data, self._audio.SAMPLE_RATE, num_bins=32,
@@ -625,7 +796,7 @@ class RenderEngine:
                             COL_GRAPH_SPECTRUM,
                             (bar_x, bar_y, max(1, bar_w - 1), bar_h),
                         )
-            y += graph_h + 22
+            y += spec_label.get_height() + 2 + graph_h + SPACE_MD
 
     def _draw_waveform(
         self,
@@ -634,7 +805,7 @@ class RenderEngine:
         color: tuple[int, int, int],
         multiplier: float = 1.0,
     ) -> float:
-        """Render a simple line-plot waveform inside *rect* using viz_engine.
+        """Render a smooth anti-aliased waveform inside *rect* using viz_engine.
 
         Returns the actual pre-scaling peak amplitude computed by viz_engine.
         """
@@ -660,22 +831,32 @@ class RenderEngine:
             points.append((x, y))
 
         if len(points) > 1:
-            pygame.draw.lines(self._screen, color, False, points, 1)
+            # Use anti-aliased lines for smoother waveform rendering
+            pygame.draw.aalines(self._screen, color, False, points)
 
         return peak
 
     # ------------------------------------------------------------------
-    # Draw the dragged item ghost
+    # Draw the dragged item ghost (Part 6: fixed alpha via SRCALPHA surface)
     # ------------------------------------------------------------------
     def _draw_drag_ghost(self) -> None:
         if self._dragging is None:
             return
         mx, my = self._drag_mouse_pos
         radius = max(2, self._cell_size // 2 - 2)
+
         if self._dragging == "listener":
-            pygame.draw.circle(self._screen, (*COL_LISTENER, 160), (mx, my), radius)
+            ghost_color = (*COL_LISTENER, 120)
         elif self._dragging == "source":
-            pygame.draw.circle(self._screen, (*COL_SOURCE, 160), (mx, my), radius)
+            ghost_color = (*COL_SOURCE, 120)
+        else:
+            return
+
+        # Draw onto a temporary SRCALPHA surface so alpha actually works
+        diameter = radius * 2 + 4
+        ghost_surf = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
+        pygame.draw.circle(ghost_surf, ghost_color, (diameter // 2, diameter // 2), radius)
+        self._screen.blit(ghost_surf, (mx - diameter // 2, my - diameter // 2))
 
     # ------------------------------------------------------------------
     # Event handling
@@ -687,7 +868,9 @@ class RenderEngine:
                 return
 
             elif event.type == pygame.VIDEORESIZE:
-                self._screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
+                self._screen = pygame.display.set_mode(
+                    (event.w, event.h), pygame.RESIZABLE | pygame.DOUBLEBUF
+                )
                 self._update_layout()
 
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -920,7 +1103,7 @@ class RenderEngine:
             # Sync network sources before drawing.
             self._sync_network_sources()
 
-            self._screen.fill(COL_BG)
+            self._screen.fill(COL_BG_BASE)
             self._draw_grid()
             self._draw_walls()
             self._draw_source_paths()

@@ -222,16 +222,15 @@
     \begin{column}{0.46\textwidth}
       \begin{notebox}[The Central Challenge]
         \small\textit{``Can we simulate walls, materials, and echoes
-        convincingly, live, using \textbf{only} the signal-processing
-        tools this course taught us?''}
+        convincingly, live, using foundational signal-processing principles?''}
 
         \vspace{4pt}
-        \flag[accent]{IN SCOPE}\; {\scriptsize Fourier, DFT, FFT, convolution}\\[3pt]
-        \flag[accent3]{OUT OF SCOPE}\; {\scriptsize Laplace/Z-transforms, IIR cascades}
+        \flag[accent]{IN SCOPE}\; {\scriptsize Discrete signals, convolution, recursive IIR, delays}\\[3pt]
+        \flag[accent2]{REAL-TIME}\; {\scriptsize Causal stateful processing at 44.1\,kHz}
 
         \vspace{4pt}
         {\scriptsize\textcolor{muted}{Goal: a real-time (44.1\,kHz)
-        interactive sandbox, built from FFT multiplication,
+        interactive sandbox, built from stateful IIR filtering,
         delay lines, and 2D grid search.}}
       \end{notebox}
     \end{column}
@@ -470,117 +469,114 @@
   \end{itemize}
 
   \vspace{10pt}
-  \textcolor{muted}{\scriptsize $\implies$ Next: the obvious textbook solution, and why our syllabus forced us to build something better.}
+  \textcolor{muted}{\scriptsize $\implies$ Next: filtering architectures, the circular-convolution boundary artifact, and stateful IIR design.}
 \end{frame}
 
 %=====================================================================
-% FRAME -- FILTERING: THE SYLLABUS DILEMMA (IIR VS. FFT)
+% FRAME -- FILTERING: ARCHITECTURE & ARTIFACT DISCOVERY
 %=====================================================================
-\begin{frame}{Filtering: The Syllabus Dilemma (IIR vs.\ FFT)}
+\begin{frame}{Filtering: Architecture \& Artifact Discovery}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \flag[accent3]{REJECTED: BUTTERWORTH IIR}
+      \flag[accent3]{INITIAL ATTEMPT: PER-BLOCK FFT}
       \vspace{3pt}
       \small
       \begin{itemize}\itemsep2pt
-        \item Standard approach: 2nd-order Butterworth lowpass via \texttt{scipy.signal.sosfilt}
-        \item \textbf{Problem:} Butterworth design requires the \textbf{Z-transform} (bilinear transform, pole stability)
-        \item Z-transforms are taught \textbf{weeks later} -- defending IIR before covering the theory was a non-starter
+        \item \textbf{Intuition:} multiply by smooth cutoff in frequency domain via \texttt{rfft} / \texttt{irfft}
+        \item Process independent 1024-sample blocks with raised-cosine taper
+        \item \textbf{Catastrophic failure:} circular convolution without overlap-add wraps energy into block edges
+        \item Produces a step discontinuity every 1024 samples $\implies$ \textbf{audible 43.06\,Hz periodic buzzing artifact}!
       \end{itemize}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \flag[accent]{ADOPTED: PER-BLOCK FFT FILTER}
+      \flag[accent]{SOLUTION: STATEFUL BUTTERWORTH IIR}
       \vspace{3pt}
       \small
       \begin{itemize}\itemsep2pt
-        \item What the syllabus \textit{did} teach: DFT, FFT, frequency-domain multiplication
-        \item \textbf{Decision:} build a custom frequency-domain filter from scratch with \texttt{rfft}/\texttt{irfft}
+        \item Replaced block FFT with a causal 2nd-order Butterworth lowpass
+        \item Persistent initial condition states ($\mathbf{z}_i$) carried across blocks
+        \item \textbf{Bit-continuous seams:} zero step discontinuities, zero boundary buzz
       \end{itemize}
       \vspace{4pt}
-      \begin{notebox}[The Academic Philosophy]
-        \scriptsize\textit{Better to implement a first-principles FFT
-        filter we can rigorously defend than drop in an
-        unexplained IIR library.}
+      \begin{notebox}[Engineering Lesson]
+        \scriptsize\textit{Block-based FFT without overlap-add is non-causal circular convolution. Real-time audio requires causal, state-preserving recursive filtering.}
       \end{notebox}
     \end{column}
   \end{columns}
 \end{frame}
 
 %=====================================================================
-% FRAME -- FFT LOWPASS (A): THE RAISED-COSINE FILTER
+% FRAME -- SECOND-ORDER BUTTERWORTH IIR LOWPASS
 %=====================================================================
-\begin{frame}{Per-Block FFT Lowpass: The Raised-Cosine Filter}
+\begin{frame}{Second-Order Butterworth IIR Lowpass}
   \begin{columns}[T]
     \begin{column}{0.5\textwidth}
-      \flag{PER-BLOCK FFT}\;\flag[accent2]{RAISED-COSINE}
+      \flag{RECURSIVE FILTER}\;\flag[accent2]{DIFFERENCE EQUATION}
       \vspace{3pt}
       \small
-      Transform to frequency domain:
+      Second-order causal IIR transfer function:
       \[
-        X[k] = \text{rfft}(x[n]), \quad k = 0,\dots,N/2
+        H(z) = \frac{b_0 + b_1 z^{-1} + b_2 z^{-2}}{1 + a_1 z^{-1} + a_2 z^{-2}}
       \]
-      Raised-cosine gain curve $H(f)$, 500\,Hz transition band:
+      Time-domain difference equation:
       \[
-        H(f) = \begin{cases}
-          1.0 & f \le f_{\text{low}} \\
-          0.5\!\left(1+\cos\!\left(\pi\frac{f-f_{\text{low}}}{\Delta f}\right)\right) & f_{\text{low}} < f < f_{\text{high}} \\
-          0.0 & f \ge f_{\text{high}}
-        \end{cases}
+        y[n] = \sum_{k=0}^{2} b_k x[n-k] - \sum_{k=1}^{2} a_k y[n-k]
       \]
-      Reconstruct:
-      \[
-        y[n] = \text{irfft}\big(X[k]\cdot H[k]\big)
-      \]
+      \textbf{Second-Order Sections (SOS):}
+      \begin{itemize}\itemsep1pt
+        \item Cascaded biquad representation for maximal numerical stability
+        \item Cached filter coefficients keyed to $(f_c, f_s)$
+      \end{itemize}
     \end{column}
     \begin{column}{0.46\textwidth}
-      \flag[accent3]{FREQUENCY-DOMAIN MULTIPLICATION}
+      \flag[accent3]{ACOUSTIC CHARACTERISTICS}
       \vspace{3pt}
       \small
-      \textbf{Syllabus tie-in}
+      \textbf{Why Butterworth?}
       \begin{itemize}\itemsep2pt
-        \item Convolution theorem: multiplication in frequency domain $\equiv$ convolution in time domain
-        \item Smooth cosine taper avoids Gibbs ringing at the cutoff edge
-        \item Cutoff $f_c$ is dynamically set by the geometry engine each audio block
+        \item \textbf{Maximally flat passband:} no ripple in audible spectrum before cutoff
+        \item \textbf{Smooth roll-off:} $-12$\,dB/octave attenuation strips high-frequency treble naturally
+        \item \textbf{Dynamic cutoff:} $f_c \in [300, 4000]$\,Hz dynamically adapts as geometry changes
       \end{itemize}
       \vspace{4pt}
-      \flag[muted]{DFT}\;\flag[accent]{CONVOLUTION THEOREM}
+      \flag[muted]{IIR}\;\flag[accent]{SOS FORMAT}\;\flag[accent2]{-12 dB/OCT}
     \end{column}
   \end{columns}
 \end{frame}
 
 %=====================================================================
-% FRAME -- FFT LOWPASS (B): ENGINEERING CHOICES & DEMO
+% FRAME -- STATEFUL FILTERING: ELIMINATING BOUNDARY GLITCHES
 %=====================================================================
-\begin{frame}{FFT Lowpass: No Overlap-Add --- A Deliberate Choice}
+\begin{frame}{Stateful Filtering: Eliminating Boundary Glitches}
   \begin{columns}[T]
     \begin{column}{0.48\textwidth}
-      \flag[accent2]{WHY NO OVERLAP-ADD?}
-      \vspace{3pt}
+      \flag[accent2]{BLOCK DELAY STATE (ZI)}
+      \vspace{2pt}
       \small
-      Standard DSP calls for 50\% overlap-add to prevent circular-convolution wraparound. We deliberately omitted it:
-      \begin{itemize}\itemsep2pt
-        \item \textbf{Short effective impulse response:}
-        $L_{\text{eff}} \approx \frac{2}{\Delta f}\,f_s = \frac{2}{500}\cdot 44100 \approx 176$ samples
-        \item $176 \ll 1024$ (block size) -- wraparound artifacts are negligible
-        \item \textbf{State simplicity:} avoids overlap-buffer bookkeeping as sources move dynamically
+      Streaming audio in 1024-sample chunks resets filters without state:
+      \begin{itemize}\itemsep1pt
+        \item \textbf{Direct Form II Transposed:} 2 delay registers $\mathbf{z} = [z_1, z_2]^T$ per channel
+        \item \textbf{State carry-over across blocks:}
+        \\[2pt]
+        \centerline{\scriptsize $(y_B, \mathbf{z}_{\text{out}}) = \text{sosfilt}(\text{sos}, x_B, \text{zi}=\mathbf{z}_{\text{in}})$}
+        \item \textbf{$C^0/C^1$ continuity:} smooth sample transitions at block boundaries
       \end{itemize}
+      \vspace{2pt}
+      \flag[muted]{STATEFUL ZI}\;\flag[accent3]{C0 CONT.}\;\flag[accent]{O(N) CAUSAL}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \flag[accent]{ENGINEERING SUMMARY}
-      \vspace{3pt}
+      \flag[accent]{ENGINEERING HIGHLIGHTS}
+      \vspace{2pt}
       \small
-      \begin{itemize}\itemsep2pt
-        \item No Z-transform mathematics required
-        \item 176-sample effective impulse $\ll$ 1024-sample block
-        \item Fully defensible with DFT / FFT theory from the syllabus
+      \begin{itemize}\itemsep1pt
+        \item $O(N)$ computation per block (faster than FFT)
+        \item 100\% artifact-free: zero 43\,Hz boundary buzz
+         \item Independent filter state for direct, transmission, and echo paths
       \end{itemize}
-      \vspace{4pt}
-      \flag[muted]{176-SAMPLE IMPULSE}\;\flag[accent3]{NO Z-TRANSFORM}
-      \vspace{6pt}
+      \vspace{2pt}
       \begin{notebox}[Live Demo Cue]
         \flag[accent2]{DEMO CUT}\; \scriptsize Toggle a wall between
-        source and listener -- immediate treble muffling; watch the
-        spectrum visualizer's high-frequency bins collapse live.
+        source and listener -- smooth, artifact-free roll-off live.
       \end{notebox}
     \end{column}
   \end{columns}
@@ -604,7 +600,7 @@
     \vspace{4pt}
     \normalsize Sound waves diffract and bend around corners. How do
     we quantify ``how obstructed'' a path is in arbitrary grid
-    geometry, and map that directly to our FFT filter?
+    geometry, and map that directly to our lowpass filter?
   \end{notebox}
 
   \vspace{12pt}
@@ -811,31 +807,32 @@
 % FRAME -- CHALLENGE 5: PROBLEM STATEMENT
 %=====================================================================
 \begin{frame}{Challenge 5: Total Occlusion \& The Snapping Problem}
-  \vspace{8pt}
-  {\large\textit{``What happens when you close the last door and
+  \vspace{2pt}
+  \normalsize\textit{``What happens when you close the last door and
   completely box a sound in? It shouldn't suddenly snap to dead
-  silence. Real walls let sound bleed straight through.''}}
+  silence. Real walls let sound bleed straight through.''}
 
-  \vspace{14pt}
+  \vspace{6pt}
   \centering
   \begin{notebox}[]
     \centering
     \flag[accent]{THE CHALLENGE}
 
-    \vspace{4pt}
-    \normalsize When a room is fully sealed and no open path exists,
+    \vspace{3pt}
+    \small When a room is fully sealed and no open path exists,
     how do we model acoustic penetration continuously --- without
     jarring volume jumps or artificial floor hacks?
   \end{notebox}
 
-  \vspace{12pt}
+  \vspace{5pt}
   \raggedright
-  \begin{itemize}
-    \item Sound doesn't only bend around edges; acoustic energy penetrates directly through solid matter
-    \item Placing the final wall tile must produce a smooth, continuous fade --- not an abrupt snap
+  \small
+  \begin{itemize}\itemsep2pt
+    \item \textbf{Wave penetration:} Acoustic energy travels directly through solid wall matter
+    \item \textbf{Boundary continuity:} Sealing the final gap must fade smoothly without volume snaps
   \end{itemize}
 
-  \vspace{10pt}
+  \vspace{5pt}
   \textcolor{muted}{\scriptsize $\implies$ Next: why our initial ``floor gain'' shortcut failed, and how true material transmission replaced it.}
 \end{frame}
 
@@ -968,18 +965,19 @@
       \end{itemize}
     \end{column}
     \begin{column}{0.48\textwidth}
-      \flag[accent2]{DUAL LINE-OF-SIGHT FILTER}
+      \flag[accent2]{VISIBILITY \& HALF-SPACE FILTER}
       \vspace{3pt}
       \small
-      A wall qualifies as a true reflector only if \textbf{two} rays are clear:
+      A wall cell qualifies as a true reflector only if:
       \begin{itemize}\itemsep1pt
-        \item Source $\to$ Wall unobstructed
-        \item Wall $\to$ Listener unobstructed
+        \item Source $\to$ Wall and Wall $\to$ Listener are unobstructed
+        \item \textbf{Surface normal check:} $(\mathbf{x}_{\text{lis}} - \mathbf{x}_{\text{wall}}) \cdot \hat{\mathbf{n}}_{\text{wall}} > 0$
+        \item Eliminates phantom echoes through the rear of occluding walls
       \end{itemize}
       \vspace{2pt}
       \textbf{Predicted loudness:}
       \[
-        L(c) = \frac{1.0}{1.0+0.08\cdot 2\,d_{\text{wall}}}\;\cdot\;\alpha_{\text{material}}
+        L(c) = \frac{0.75 \cdot \alpha_{\text{material}}}{1.0 + 0.05 \cdot 2\,d_{\text{wall}}}
       \]
       \textbf{Top-4 selection:} ranked by $L(c)$; best $M\!\le\!4$ sent to DSP.
     \end{column}
@@ -998,8 +996,9 @@
       \textbf{Four persistent ring buffers} {\scriptsize(\texttt{dsp\_engine.py})}
       \begin{itemize}\itemsep2pt
         \item \texttt{echo\_delay\_buf\_0}\,\ldots\,\texttt{buf\_3} in \texttt{filter\_state}
-        \item \textbf{Round-trip delay:}\; $D_i = \text{round}(2\,d_{\text{wall},i}\!\cdot\!40)$ samples
-        \item \textbf{Echo gain:}\; $g_{C,i} = \dfrac{\alpha_i}{1.0+0.08\cdot 2\,d_{\text{wall},i}}$
+        \item \textbf{Round-trip delay:}\; $D_i = \text{round}(2\,d_{\text{wall},i}\!\cdot\!110)$ samples
+        \item $\approx 2.5$\,ms per grid unit $\implies 80\text{--}120$\,ms clear slapback
+        \item \textbf{Echo gain:}\; $g_{C,i} = \dfrac{0.75 \cdot \alpha_i}{1.0+0.05\cdot 2\,d_{\text{wall},i}}$
       \end{itemize}
     \end{column}
     \begin{column}{0.48\textwidth}
@@ -1013,7 +1012,7 @@
       \begin{itemize}\itemsep2pt
         \item Hard wall ($\alpha\!=\!0.90$): bright, crisp echo
         \item Soft curtain ($\alpha\!=\!0.25$): heavily damped echo
-        \item Each echo is independently filtered, delayed, and gained
+        \item Each echo is independently IIR-filtered, delayed, and panned
       \end{itemize}
     \end{column}
   \end{columns}
@@ -1358,7 +1357,7 @@
     \begin{column}{0.48\textwidth}
       \begin{enumerate}\itemsep2pt
         \item \textbf{Distance \& panning:} signal scaling, spatial balance
-        \item \textbf{Per-block FFT lowpass:} discrete Fourier filtering (no IIR)
+        \item \textbf{Stateful IIR lowpass:} causal 2nd-order Butterworth filters
         \item \textbf{Diffraction routing:} 8-dir Yen's A* with corner penalty
         \item \textbf{Discrete delay lines:} circular buffers for propagation
       \end{enumerate}
@@ -1377,7 +1376,7 @@
   \centering
   \fadebar{5.0}
   \vspace{6pt}
-  {\small\textcolor{muted}{\\A complete from-scratch layered audio model, built strictly from DFT/FFT, delay operators, and 2D grid search.}}
+  {\small\textcolor{muted}{\\A complete from-scratch layered audio model, built from recursive IIR filtering, delay networks, and 2D grid search.}}
 \end{frame}
 
 %=====================================================================
@@ -1420,31 +1419,29 @@
 % FRAME -- LIVE DEMONSTRATION
 %=====================================================================
 \begin{frame}{Live Demonstration}
-  \vspace{4pt}
   \centering
   \begin{notebox}[]
     \centering
     \flag[accent2]{THE SANDBOX IN ACTION}
 
-    \vspace{4pt}
-    {\Large\textbf{Interactive Demonstration}}\\[3pt]
-    \normalsize We invite you to test, draw, and listen to the engine live.
+    \vspace{2pt}
+    {\large\textbf{Interactive Demonstration}}\\[2pt]
+    \small Fast scene exploration via \textbf{Hotkeys [1]--[8]} or sidebar dropdown.
   \end{notebox}
 
-  \vspace{12pt}
+  \vspace{4pt}
   \raggedright
   \small
-  \begin{enumerate}\itemsep2pt
-    \item \textbf{Move the source:} smooth inverse-distance decay and stereo pan
-    \item \textbf{Drop a wall:} watch high frequencies collapse on the spectrum sidebar
-    \item \textbf{Box in the listener:} smooth fade into through-wall bleed -- zero snapping
-    \item \textbf{Switch materials:} bright slapback off Concrete vs.\ deadened Curtain
-    \item \textbf{Dual reflectors:} two distinct echoes from separate walls at different times
+  \begin{enumerate}\itemsep1pt
+    \item \textbf{Presets [1]--[3] (Occlusion \& Diffraction):} LoS baseline $\to$ single-wall shadow $\to$ multi-corner maze
+    \item \textbf{Presets [4]--[6] (Echoes \& Stereo):} Slapback echo off concrete $\to$ through-wall bleed $\to$ ping-pong stereo
+    \item \textbf{Presets [7]--[8] (Materials \& Multi-Source):} Curtain dampening vs.\ dual independent audio sources
+    \item \textbf{Dynamic Sandbox:} drag source/listener live, draw custom walls, toggle materials
   \end{enumerate}
 
-  \vspace{8pt}
+  \vspace{3pt}
   \centering
-  \flag{3 INPUT MODES}\;\flag[accent2]{3 ARRIVAL FAMILIES}\;\flag[accent3]{117+ PASSING TESTS}\;\flag[muted]{LIVE DEMO}
+  \flag{HOTKEYS 1--8}\;\flag[accent2]{8 PRESET SCENES}\;\flag[accent3]{117+ PASSING TESTS}\;\flag[muted]{LIVE DEMO}
 \end{frame}
 
 %=====================================================================
@@ -1461,10 +1458,3 @@
 \end{frame}
 
 \end{document}
-
-
-okay here's the feedback. 
-1. There's a constant low "rattling" sound artefact. Its actually proportional to the sound I'm hearing, so that may be a clue. Its not realling a rattling, but more close to a "vibration sound". We must get rid of it completely.
-2. None of the preset's audio difference is clearly observable apart from 1 ,5 and 8. maybe 3, and 6 but that's stretching it. So basically for 1, 5 and 8 the point is made plenty clear. for 3 and 6 you have to be really listening to catch it. But 4 and 6 are kind of impossible to hear and single out.
-3. But the most egregious is preset 2. putting a wall seems to boost the volume instead of quietening it. I suppose its because when there is a wall, the sound output is the sum of a few things: the main sound path (taking corners), the sound that comes through the wall, and the multiple pink "echo" lines. So its louder. We have to fix it.
-Analyze and find out the internal reason for all 3. But don't reason in silence. That way we could actually run out of tokens with nothing to show for. Keep outputting what you find as you find. Hopefully no major refurbishing has to be done. Just tuning the "knobs" the various variables should do the trick. But don't be biased. If there is an underlying design issue, please find out. don't try to fix anything yet, that's not your job.

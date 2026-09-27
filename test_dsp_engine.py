@@ -668,10 +668,12 @@ def test_multi_echo_independently_panned_and_delayed() -> None:
     print("\n--- Test: multi-echo -- independently panned and delayed ---")
     source = (20.0, 12.0)
     listener = (20.0, 10.0)
-    # Wall 1: (15, 12) -> dx_echo = -5 (panned left), dist = 5.0 -> delay = 400 samples
-    # Wall 2: (28, 12) -> dx_echo = +8 (panned right), dist = 8.0 -> delay = 640 samples
-    walls = {(15, 12), (28, 12)}
-    wall_gains = {(15, 12): 0.9, (28, 12): 0.9}
+    # Walls chosen so delays fit in 1024 samples at _SAMPLES_PER_GRID_UNIT <= 250.
+    # dist_0=2.0 -> delay_0=2*2*SPU (panned left, dx=-2)
+    # dist_1=4.0 -> delay_1=2*4*SPU (panned right, dx=+4)
+    SPU = dsp_engine._SAMPLES_PER_GRID_UNIT
+    walls = {(18, 12), (24, 12)}
+    wall_gains = {(18, 12): 0.9, (24, 12): 0.9}
     fstate: dict = {}
 
     # Use a single unit impulse so echoes arrive as distinct spikes at their delay offsets
@@ -682,20 +684,20 @@ def test_multi_echo_independently_panned_and_delayed() -> None:
 
     _pf("slot 0 and 1 allocated", "echo_delay_buf_0" in fstate and "echo_delay_buf_1" in fstate)
 
-    # Echo 0 arrives at sample 400, panned left (L > R)
-    left_400 = float(out[400, 0])
-    right_400 = float(out[400, 1])
-    _pf("echo 0 arrives at sample 400 with non-zero energy", abs(left_400) > 0.01)
-    _pf("echo 0 panned left (L > R)", left_400 > right_400, f"L={left_400:.4f}, R={right_400:.4f}")
+    delay_0 = int(round(2.0 * 2.0 * SPU))
+    delay_1 = int(round(2.0 * 4.0 * SPU))
 
-    # Echo 1 arrives at sample 640, panned right (R > L)
-    left_640 = float(out[640, 0])
-    right_640 = float(out[640, 1])
-    _pf("echo 1 arrives at sample 640 with non-zero energy", abs(right_640) > 0.01)
-    _pf("echo 1 panned right (R > L)", right_640 > left_640, f"L={left_640:.4f}, R={right_640:.4f}")
+    left_0 = float(out[delay_0, 0])
+    right_0 = float(out[delay_0, 1])
+    _pf(f"echo 0 arrives at sample {delay_0} with non-zero energy", abs(left_0) > 0.01)
+    _pf("echo 0 panned left (L > R)", left_0 > right_0, f"L={left_0:.4f}, R={right_0:.4f}")
 
-    # Echoes do not arrive at each other's timestamps
-    _pf("echo 1 quiet at sample 400 before its arrival", abs(out[400, 1] - right_400) < 1e-4)
+    left_1 = float(out[delay_1, 0])
+    right_1 = float(out[delay_1, 1])
+    _pf(f"echo 1 arrives at sample {delay_1} with non-zero energy", abs(right_1) > 0.01)
+    _pf("echo 1 panned right (R > L)", right_1 > left_1, f"L={left_1:.4f}, R={right_1:.4f}")
+
+    _pf(f"echo 1 quiet at sample {delay_0} before its arrival", abs(out[delay_0, 1] - right_0) < 1e-4)
 
 
 def test_echo_shrinking_candidate_count_flushes_stale_slots() -> None:

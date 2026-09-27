@@ -130,14 +130,13 @@ _ECHO_CUTOFF_MUFFLE_RANGE_HZ: float = 3000.0
 _TRANSITION_BW_HZ: float = 500.0
 
 # Echo delay parameters (Family C).
-# _SAMPLES_PER_GRID_UNIT: at 44100 Hz, 40 samples ~ 0.9 ms per grid unit of
-# extra round-trip distance.  This gives roughly 1-2 ms of delay per extra
-# grid unit, producing a small-room echo feel.  Empirical / tunable.
-_SAMPLES_PER_GRID_UNIT: int = 40
+# _SAMPLES_PER_GRID_UNIT: at 44100 Hz, 110 samples ~ 2.5 ms per grid unit of
+# extra round-trip distance (~80-120 ms slapback at typical room distances).
+_SAMPLES_PER_GRID_UNIT: int = 110
 
 # _MAX_DELAY_SAMPLES: upper bound on echo delay to cap buffer memory in
-# pathological mazes.  8000 samples ~ 181 ms at 44100 Hz.
-_MAX_DELAY_SAMPLES: int = 8000
+# pathological mazes.  16000 samples ~ 363 ms at 44100 Hz.
+_MAX_DELAY_SAMPLES: int = 16000
 
 
 # ---------------------------------------------------------------------------
@@ -236,11 +235,10 @@ def _echo_gain(candidate: ReflectorCandidate) -> float:
     """Compute discrete echo gain (Family C).
 
     Predicted echo loudness based on two-way distance attenuation and
-    the reflecting wall's material reflectivity.  Matches the exact
-    formula used by find_reflector_candidates() to rank candidates:
-    gain = (1.0 / (1.0 + 0.08 * 2.0 * distance_to_wall)) * material_gain.
+    the reflecting wall's material reflectivity.  Boosted 0.75x scaling
+    ensures reflections are perceptible above the direct arrival.
     """
-    return (1.0 / (1.0 + 0.08 * 2.0 * candidate.distance_to_wall)) * candidate.material_gain
+    return (1.0 / (1.0 + 0.05 * 2.0 * candidate.distance_to_wall)) * candidate.material_gain * 0.75
 
 
 def _echo_cutoff_hz(candidate: ReflectorCandidate) -> float:

@@ -47,8 +47,8 @@ PRESETS = {
         "description": "Compare corner diffraction vs open line-of-sight.",
         "listener": (26, 16),
         "sources": [
-            {"pos": (14, 8), "file": _DEFAULT_AUDIO},   # Source 1: behind L-wall
-            {"pos": (26, 6), "file": _DEFAULT_AUDIO},   # Source 2: direct line-of-sight
+            {"pos": (14, 8), "file": _DEFAULT_AUDIO},   # Source 1: behind L-wall (diffracted, muffled)
+            {"pos": (32, 6), "file": _DEFAULT_AUDIO},   # Source 2: direct LoS (further, less masked)
         ],
         "walls": {
             # Horizontal segment: row 12, cols 18..26
@@ -66,7 +66,7 @@ PRESETS = {
             {"pos": (12, 12), "file": _DEFAULT_AUDIO},
         ],
         "walls": {
-            (28, r): WALL_GAIN_HARD for r in range(4, 21)
+            (32, r): WALL_GAIN_HARD for r in range(4, 21)
         },
     },
 
@@ -92,15 +92,15 @@ PRESETS = {
     6: {
         "title": "Multi-Echo Network",
         "description": "Two side walls produce spatially separated echoes with independent panning.",
-        "listener": (20, 12),
+        "listener": (20, 14),
         "sources": [
             {"pos": (20, 10), "file": _DEFAULT_AUDIO},
         ],
         "walls": {
-            # Left concrete wall: col 8, rows 4..20
-            **{(8, r): WALL_GAIN_HARD for r in range(4, 21)},
-            # Right wood wall: col 32, rows 4..20
-            **{(32, r): WALL_GAIN_MEDIUM for r in range(4, 21)},
+            # Left concrete wall: col 6, rows 4..20 (~70 ms, panned left, bright)
+            **{(6, r): WALL_GAIN_HARD for r in range(4, 21)},
+            # Right wood wall: col 34, rows 4..20 (~110 ms, panned right, warmer)
+            **{(34, r): WALL_GAIN_MEDIUM for r in range(4, 21)},
         },
     },
 

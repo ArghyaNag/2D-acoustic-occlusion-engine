@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.28 (MiKTeX 25.12) (preloaded format=pdflatex 2026.7.13)  27 SEP 2026 11:20
+This is pdfTeX, Version 3.141592653-2.6-1.40.28 (MiKTeX 25.12) (preloaded format=pdflatex 2026.7.13)  27 SEP 2026 13:38
 entering extended mode
  restricted \write18 enabled.
  file:line:error style messages enabled.
@@ -930,34 +930,30 @@ Overfull \vbox (15.87549pt too high) detected at line 1093
 
 [26
 
-]
-Overfull \vbox (10.54782pt too high) detected at line 1130
- []
-
-[27
+] [27
 
 ] [28
 
 ]
-Overfull \vbox (18.18599pt too high) detected at line 1198
+Overfull \vbox (18.18599pt too high) detected at line 1201
  []
 
 [29
 
 ]
-Overfull \vbox (14.91618pt too high) detected at line 1239
+Overfull \vbox (14.91618pt too high) detected at line 1242
  []
 
 [30
 
 ]
-Overfull \vbox (13.0662pt too high) detected at line 1275
+Overfull \vbox (13.0662pt too high) detected at line 1278
  []
 
 [31
 
 ]
-Overfull \vbox (12.88216pt too high) detected at line 1310
+Overfull \vbox (12.88216pt too high) detected at line 1313
  []
 
 [32
@@ -969,7 +965,7 @@ Overfull \vbox (12.88216pt too high) detected at line 1310
 ] [35
 
 ]
-Overfull \vbox (3.56827pt too high) detected at line 1445
+Overfull \vbox (3.56827pt too high) detected at line 1448
  []
 
 [36
@@ -997,13 +993,13 @@ Package rerunfilecheck Info: File `file.out' has not changed.
 Here is how much of TeX's memory you used:
  29305 strings out of 467871
  600159 string characters out of 5433290
- 1038764 words of memory out of 5000000
+ 1038757 words of memory out of 5000000
  57546 multiletter control sequences out of 15000+600000
  709035 words of font info for 122 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  128i,18n,123p,444b,1444s stack positions out of 10000i,1000n,20000p,200000b,200000s
  <C:\Users\UseR\AppData\Local\MiKTeX\fonts/pk/ljfour/jknappen/ec/dpi600\ectt1000.pk> <C:\Users\UseR\AppData\Local\MiKTeX\fonts/pk/ljfour/jknappen/ec/dpi600\ectt0800.pk><E:/MiktextNew/fonts/type1/public/amsfonts/cm/cmex10.pfb><E:/MiktextNew/fonts/type1/public/amsfonts/cm/cmmi10.pfb><E:/MiktextNew/fonts/type1/public/amsfonts/cm/cmmi7.pfb><E:/MiktextNew/fonts/type1/public/amsfonts/cm/cmmi8.pfb><E:/MiktextNew/fonts/type1/public/amsfonts/cm/cmss10.pfb><E:/MiktextNew/fonts/type1/public/amsfonts/cm/cmss8.pfb><E:/MiktextNew/fonts/type1/public/amsfonts/cm/cmsy10.pfb><E:/MiktextNew/fonts/type1/public/amsfonts/cm/cmsy7.pfb><E:/MiktextNew/fonts/type1/public/amsfonts/cm/cmsy8.pfb><E:/MiktextNew/fonts/type1/urw/helvetic/uhvb8a.pfb><E:/MiktextNew/fonts/type1/urw/helvetic/uhvbo8a.pfb><E:/MiktextNew/fonts/type1/urw/helvetic/uhvr8a.pfb><E:/MiktextNew/fonts/type1/urw/helvetic/uhvro8a.pfb>
-Output written on file.pdf (37 pages, 282131 bytes).
+Output written on file.pdf (37 pages, 282112 bytes).
 PDF statistics:
  386 PDF objects out of 1000 (max. 8388607)
  75 named destinations out of 1000 (max. 500000)

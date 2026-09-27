@@ -94,6 +94,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from scipy.signal import butter, sosfilt
 
 from pathfinding import (
     find_k_paths, has_line_of_sight,
@@ -159,15 +160,19 @@ def _primary_cutoff_hz(
     source_cell: tuple[int, int],
     corners: int,
     walls: set[tuple[int, int]] | frozenset[tuple[int, int]],
+    nyquist: float = 22050.0,
 ) -> float:
     """Determine the lowpass cutoff for the primary arrival.
 
     If direct line-of-sight between listener and source is unobstructed,
-    the full _BASE_CUTOFF_HZ is returned regardless of grid-discretization
-    corners.  If obstructed by a wall, the corner-driven formula is used.
+    return *nyquist* so that the caller's ``if cutoff < nyquist`` guard
+    skips filtering entirely -- preserving full audio fidelity and avoiding
+    any block-boundary artifacts on clean, unobstructed sound.
+
+    If obstructed by a wall, the corner-driven formula is used.
     """
     if has_line_of_sight(listener_cell, source_cell, walls):
-        return _BASE_CUTOFF_HZ
+        return nyquist
     return _corner_cutoff_hz(corners)
 
 
@@ -253,16 +258,41 @@ def _echo_cutoff_hz(candidate: ReflectorCandidate) -> float:
 
 
 # ---------------------------------------------------------------------------
-# FFT-based lowpass filter (per-block, no overlap)
+# Stateful IIR lowpass filter (replaces old per-block FFT approach)
 # ---------------------------------------------------------------------------
-def _fft_lowpass(mono: np.ndarray, cutoff_hz: float, sample_rate: int) -> np.ndarray:
-    """Apply a block-based FFT lowpass filter with smooth rolloff.
 
-    Uses numpy's rfft / irfft on real-valued input.  Applies a raised-
-    cosine (Hann-window-shaped) taper in the frequency domain around
-    *cutoff_hz* rather than a brick-wall, keeping the effective impulse
-    response short and minimising circular-convolution wrap-around
-    artifacts at block boundaries.
+# Cache for SOS coefficient arrays keyed by (cutoff_hz, sample_rate) to
+# avoid recomputing Butterworth coefficients every block.
+_sos_cache: dict[tuple[float, int], np.ndarray] = {}
+
+
+def _get_sos(cutoff_hz: float, sample_rate: int) -> np.ndarray:
+    """Return cached 2nd-order-sections for a Butterworth lowpass."""
+    key = (cutoff_hz, sample_rate)
+    sos = _sos_cache.get(key)
+    if sos is None:
+        # Clamp cutoff just below Nyquist to keep butter() happy
+        nyq = sample_rate / 2.0
+        safe_cutoff = min(cutoff_hz, nyq * 0.9999)
+        sos = butter(2, safe_cutoff, btype='low', fs=sample_rate, output='sos')
+        _sos_cache[key] = sos
+    return sos
+
+
+def _stateful_lowpass(
+    mono: np.ndarray,
+    cutoff_hz: float,
+    sample_rate: int,
+    filter_state: dict,
+    state_key: str,
+) -> np.ndarray:
+    """Apply a stateful 2nd-order Butterworth IIR lowpass filter.
+
+    Unlike the old per-block FFT approach, this filter maintains internal
+    state (``zi``) across consecutive blocks via *filter_state*, ensuring
+    perfect sample-level continuity at block boundaries.  This eliminates
+    the 43 Hz step-discontinuity artifact that the stateless FFT method
+    produced.
 
     Parameters
     ----------
@@ -272,37 +302,35 @@ def _fft_lowpass(mono: np.ndarray, cutoff_hz: float, sample_rate: int) -> np.nda
         Lowpass cutoff frequency in Hz.
     sample_rate : int
         Audio sample rate in Hz.
+    filter_state : dict
+        Mutable dict persisted across calls.  The filter's internal
+        state vector is stored under ``filter_state[state_key]``.
+    state_key : str
+        Unique key identifying this particular filter instance (e.g.
+        ``"primary_lpf"``, ``"trans_lpf"``, ``"echo_lpf_0"``).
 
     Returns
     -------
     np.ndarray
         Filtered mono block, same length as input, dtype float32.
     """
-    n = len(mono)
-    freqs = np.fft.rfftfreq(n, d=1.0 / sample_rate)
-    spectrum = np.fft.rfft(mono)
+    sos = _get_sos(cutoff_hz, sample_rate)
+    zi_key = state_key + "_zi"
+    prev_cutoff_key = state_key + "_cutoff"
 
-    # Build gain curve: 1.0 below cutoff, raised-cosine taper, 0.0 above.
-    half_bw = _TRANSITION_BW_HZ / 2.0
-    low = max(0.0, cutoff_hz - half_bw)   # full-pass edge (clamped >= 0)
-    high = cutoff_hz + half_bw             # full-stop edge
-    bw = high - low                        # actual transition width (may differ
-                                           # from _TRANSITION_BW_HZ if low was clamped)
+    zi = filter_state.get(zi_key)
+    prev_cutoff = filter_state.get(prev_cutoff_key)
 
-    gains = np.ones(len(freqs), dtype=np.float64)
+    # Reset state if this is the first call or if the cutoff changed
+    # (avoids transient pops when switching presets / moving around corners).
+    if zi is None or prev_cutoff != cutoff_hz:
+        from scipy.signal import sosfilt_zi
+        zi = sosfilt_zi(sos) * mono[0]  # initialise to first sample DC
 
-    # Transition band: raised-cosine taper (gain goes 1 -> 0 over [low, high])
-    transition_mask = (freqs > low) & (freqs < high)
-    if np.any(transition_mask):
-        gains[transition_mask] = 0.5 * (
-            1.0 + np.cos(np.pi * (freqs[transition_mask] - low) / max(1e-9, bw))
-        )
-
-    # Stopband: zero
-    gains[freqs >= high] = 0.0
-
-    spectrum *= gains
-    return np.fft.irfft(spectrum, n=n).astype(np.float32)
+    filtered, zi_out = sosfilt(sos, mono, zi=zi)
+    filter_state[zi_key] = zi_out
+    filter_state[prev_cutoff_key] = cutoff_hz
+    return filtered.astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +577,7 @@ def process_block(
             trans_mono = input_block.astype(np.float32, copy=True)
             trans_cutoff = _transmission_cutoff_hz(transmission_path)
             if trans_cutoff < nyquist:
-                trans_mono = _fft_lowpass(trans_mono, trans_cutoff, sample_rate)
+                trans_mono = _stateful_lowpass(trans_mono, trans_cutoff, sample_rate, filter_state, "trans_lpf_occ")
             trans_mono *= trans_gain
             out[:, 0] += trans_mono * trans_left
             out[:, 1] += trans_mono * trans_right
@@ -564,7 +592,7 @@ def process_block(
                 echo_mono = input_block.astype(np.float32, copy=True)
                 echo_cutoff = _echo_cutoff_hz(echo_candidate)
                 if echo_cutoff < nyquist:
-                    echo_mono = _fft_lowpass(echo_mono, echo_cutoff, sample_rate)
+                    echo_mono = _stateful_lowpass(echo_mono, echo_cutoff, sample_rate, filter_state, f"echo_lpf_occ_{i}")
                 echo_mono *= _echo_gain(echo_candidate)
                 round_trip_samples = int(round(
                     2.0 * echo_candidate.distance_to_wall * _SAMPLES_PER_GRID_UNIT
@@ -596,10 +624,10 @@ def process_block(
 
     # Corner-driven FFT lowpass (with line-of-sight check to ignore grid discretization corners)
     primary_cutoff = _primary_cutoff_hz(
-        listener_cell, source_cell, primary_path.corners, walls
+        listener_cell, source_cell, primary_path.corners, walls, nyquist=nyquist
     )
     if primary_cutoff < nyquist:
-        primary_mono = _fft_lowpass(primary_mono, primary_cutoff, sample_rate)
+        primary_mono = _stateful_lowpass(primary_mono, primary_cutoff, sample_rate, filter_state, "primary_lpf")
 
     # Path-length distance gain
     primary_gain = 1.0 / (1.0 + 0.08 * primary_path.length)
@@ -624,7 +652,7 @@ def process_block(
         trans_mono = input_block.astype(np.float32, copy=True)
         trans_cutoff = _transmission_cutoff_hz(transmission_path)
         if trans_cutoff < nyquist:
-            trans_mono = _fft_lowpass(trans_mono, trans_cutoff, sample_rate)
+            trans_mono = _stateful_lowpass(trans_mono, trans_cutoff, sample_rate, filter_state, "trans_lpf")
         trans_mono *= trans_gain
         out[:, 0] += trans_mono * primary_left
         out[:, 1] += trans_mono * primary_right
@@ -639,7 +667,7 @@ def process_block(
             echo_mono = input_block.astype(np.float32, copy=True)
             echo_cutoff = _echo_cutoff_hz(echo_candidate)
             if echo_cutoff < nyquist:
-                echo_mono = _fft_lowpass(echo_mono, echo_cutoff, sample_rate)
+                echo_mono = _stateful_lowpass(echo_mono, echo_cutoff, sample_rate, filter_state, f"echo_lpf_{i}")
             echo_mono *= _echo_gain(echo_candidate)
             round_trip_samples = int(round(
                 2.0 * echo_candidate.distance_to_wall * _SAMPLES_PER_GRID_UNIT

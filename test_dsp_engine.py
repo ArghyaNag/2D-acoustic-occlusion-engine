@@ -313,8 +313,8 @@ def test_line_of_sight_discretization_bug() -> None:
     _pf("awkward angle: has_line_of_sight is True (open grid)", has_los)
 
     primary_cutoff = _primary_cutoff_hz(listener, source_awkward, paths_awkward[0].corners, open_walls)
-    _pf("awkward angle: primary cutoff == _BASE_CUTOFF_HZ (4000 Hz)",
-        primary_cutoff == _BASE_CUTOFF_HZ,
+    _pf("awkward angle: primary cutoff == nyquist (22050 Hz, unfiltered)",
+        primary_cutoff == 22050.0,
         f"got {primary_cutoff} Hz")
 
     # 2. Awkward angle WITH blocking wall on straight line
@@ -335,12 +335,12 @@ def test_line_of_sight_discretization_bug() -> None:
     source_row = (10, 5)
     source_diag = (12, 12)
     _pf("same-row open grid has LoS", has_line_of_sight(listener, source_row, open_walls))
-    _pf("same-row primary cutoff == 4000 Hz",
-        _primary_cutoff_hz(listener, source_row, 0, open_walls) == _BASE_CUTOFF_HZ)
+    _pf("same-row primary cutoff == 22050 Hz (unfiltered)",
+        _primary_cutoff_hz(listener, source_row, 0, open_walls) == 22050.0)
 
     _pf("45-deg diag open grid has LoS", has_line_of_sight(listener, source_diag, open_walls))
-    _pf("45-deg diag primary cutoff == 4000 Hz",
-        _primary_cutoff_hz(listener, source_diag, 0, open_walls) == _BASE_CUTOFF_HZ)
+    _pf("45-deg diag primary cutoff == 22050 Hz (unfiltered)",
+        _primary_cutoff_hz(listener, source_diag, 0, open_walls) == 22050.0)
 
     # 5. Audio signal verification: 2500 Hz sine tone passes unobstructed through open-grid awkward angle
     # (2500 Hz was attenuated by the old buggy 1300 Hz cutoff, but passes at 4000 Hz cutoff)

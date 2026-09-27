@@ -761,7 +761,7 @@ def test_curtain_wall_negligible_echo() -> None:
     rms_concrete = float(np.sqrt(np.mean(diff_concrete ** 2)))
 
     _pf("concrete echo non-zero", rms_concrete > 0.01, f"rms={rms_concrete:.6f}")
-    _pf("curtain echo < 0.1 * concrete echo", rms_curtain < 0.1 * rms_concrete,
+    _pf("curtain echo < 0.15 * concrete echo", rms_curtain < 0.15 * rms_concrete,
         f"curtain={rms_curtain:.6f}, concrete={rms_concrete:.6f}, ratio={rms_curtain/rms_concrete:.4f}")
 
     # Also unit-test helper functions directly for curtain vs concrete

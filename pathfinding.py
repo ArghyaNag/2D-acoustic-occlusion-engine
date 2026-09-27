@@ -473,6 +473,7 @@ def find_reflector_candidates(
 
         # Step outward from source_pos, checking every cell for walls.
         hit: tuple[int, int] | None = None
+        prev_cell: tuple[int, int] = source_pos
         for step in range(1, max_search_radius + 1):
             cx = round(source_pos[0] + step * cos_a)
             cy = round(source_pos[1] + step * sin_a)
@@ -482,10 +483,24 @@ def find_reflector_candidates(
             if (cx, cy) in walls:
                 hit = (cx, cy)
                 break
+            prev_cell = (cx, cy)
 
         if hit is None or hit in seen:
             continue
         seen.add(hit)
+
+        # Half-space check: the outward face normal (pointing into the open air
+        # on the incident side) must have a positive dot product with the
+        # hit-to-listener vector.  A physically solid wall can only reflect
+        # sound back toward the side of incidence — listeners in the shadow
+        # zone behind the wall face cannot receive a specular reflection from
+        # it, so we reject such candidates.
+        n_x = prev_cell[0] - hit[0]
+        n_y = prev_cell[1] - hit[1]
+        l_x = listener_pos[0] - hit[0]
+        l_y = listener_pos[1] - hit[1]
+        if n_x * l_x + n_y * l_y <= 0:
+            continue
 
         # Plausibility: source→wall (defensive) and wall→listener (real filter)
         if not has_line_of_sight(source_pos, hit, walls):

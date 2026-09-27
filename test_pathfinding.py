@@ -268,13 +268,15 @@ def test_reflector_sealed_source() -> None:
     _pf("precondition: wall(19,12)->listener LoS clear",
         has_line_of_sight((19, 12), listener, walls))
 
+    # With the half-space check, the interior wall face (19, 12) has its
+    # outward normal pointing East (+1, 0), toward the source inside the box.
+    # The listener at (10, 12) is to the West, so dot(normal, hit->listener) < 0.
+    # Therefore (19, 12) is correctly rejected as a reflector for an outside listener.
     results = find_reflector_candidates(
         source, listener, walls, wall_gains, GRID_COLS, GRID_ROWS,
     )
-    _pf("returns >= 1 candidate", len(results) >= 1, f"got {len(results)}")
-    found_cells = [c.wall_cell for c in results]
-    _pf("(19, 12) is among candidates", (19, 12) in found_cells,
-        f"got {found_cells}")
+    _pf("sealed source yields 0 reflectors for outside listener (half-space filter)",
+        len(results) == 0, f"got {len(results)}")
 
 
 def test_transmission_zero_walls() -> None:
@@ -329,6 +331,17 @@ def test_transmission_multiple_walls() -> None:
             f"expected {expected}, got {result}")
 
 
+def test_preset2_no_phantom_through_wall_echoes() -> None:
+    """Obstruction wall between source and listener must yield 0 reflector candidates."""
+    print("\n--- Test: Preset 2 -- no phantom through-wall echoes ---")
+    source = (15, 12)
+    listener = (25, 12)
+    walls = {(20, r) for r in range(7, 18)}
+    wall_gains = {w: 0.90 for w in walls}
+    cands = find_reflector_candidates(source, listener, walls, wall_gains, 40, 24)
+    _pf("Preset 2 yields 0 reflector candidates (shadow zone filter)", len(cands) == 0, f"got {len(cands)}")
+
+
 def main() -> None:
     print("=" * 60)
     print("  pathfinding.py -- verification script")
@@ -348,6 +361,7 @@ def main() -> None:
     test_reflector_multiple_sorted_by_loudness()
     test_reflector_none_in_radius()
     test_reflector_sealed_source()
+    test_preset2_no_phantom_through_wall_echoes()
     test_transmission_zero_walls()
     test_transmission_one_wall()
     test_transmission_multiple_walls()

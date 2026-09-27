@@ -188,3 +188,21 @@ class SharedState:
     def has_wall(self, pos: tuple[int, int]) -> bool:
         with self._lock:
             return pos in self._walls
+
+    # ------------------------------------------------------------------
+    # Scene reset (for preset system)
+    # ------------------------------------------------------------------
+    def clear_scene(self) -> list[int]:
+        """Atomically clear the entire scene and return removed source IDs.
+
+        The caller must use the returned IDs to call
+        ``AudioEngine.remove_source()`` for each — buffer cleanup is NOT
+        done here because this class has no reference to the audio engine.
+        """
+        with self._lock:
+            removed_ids = list(self._sources.keys())
+            self._sources.clear()
+            self._walls.clear()
+            self._listener_pos = None
+            # Do NOT reset _next_source_id — keeps IDs globally unique.
+            return removed_ids

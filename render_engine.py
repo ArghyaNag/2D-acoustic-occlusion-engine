@@ -30,6 +30,7 @@ from shared_state import (
     WALL_GAIN_HARD, WALL_GAIN_MEDIUM, WALL_GAIN_SOFT,
 )
 from audio_engine import AudioEngine
+from demo_presets import PRESETS, NUM_PRESETS
 from pathfinding import (
     find_k_paths,
     find_reflector_candidates,
@@ -274,6 +275,12 @@ class RenderEngine:
         self._mat_swatch_rects: list[pygame.Rect] = []  # populated in _draw_left_sidebar
         self._selected_source_id: Optional[int] = None
 
+        # ---- Preset system state ----
+        self._active_preset: Optional[int] = None  # 1-8 or None
+        self._preset_dropdown_open: bool = False
+        self._preset_dropdown_rects: list[tuple[pygame.Rect, int]] = []  # (rect, preset_num)
+        self._preset_banner_rect: Optional[pygame.Rect] = None
+
         # Control rects
         self._load_audio_btn_rect: Optional[pygame.Rect] = None
         self._loop_toggle_rect: Optional[pygame.Rect] = None
@@ -310,6 +317,52 @@ class RenderEngine:
             ox + gx * self._cell_size + self._cell_size // 2,
             oy + gy * self._cell_size + self._cell_size // 2,
         )
+
+    # ------------------------------------------------------------------
+    # Preset loading
+    # ------------------------------------------------------------------
+    def _load_preset(self, preset_num: int) -> None:
+        """Clear the scene and load preset *preset_num* (1-8)."""
+        if preset_num not in PRESETS:
+            return
+        preset = PRESETS[preset_num]
+
+        # 1) Atomically wipe state and collect old source IDs
+        removed_ids = self._state.clear_scene()
+
+        # 2) Clean up audio engine buffers for each removed source
+        for sid in removed_ids:
+            self._audio.remove_source(sid)
+
+        # 3) Reset UI selection
+        self._selected_source_id = None
+        self._dragging = None
+        self._dragging_source_id = None
+        self._wall_painting = False
+
+        # 4) Set listener
+        self._state.set_listener_pos(preset["listener"])
+
+        # 5) Place walls with material gains
+        for pos, gain in preset["walls"].items():
+            self._state.add_wall(pos, gain)
+
+        # 6) Add sources and load their audio files
+        first_sid = None
+        for src_def in preset["sources"]:
+            sid = self._state.add_source(src_def["pos"])
+            if first_sid is None:
+                first_sid = sid
+            audio_file = src_def["file"]
+            if audio_file and os.path.isfile(audio_file):
+                self._audio.load_audio_for_source(sid, audio_file)
+                self._state.set_source_audio(sid, audio_file)
+                # Start playing immediately for live demo flow
+                self._state.set_source_playing(sid, True)
+
+        self._selected_source_id = first_sid
+        self._active_preset = preset_num
+        self._preset_dropdown_open = False
 
     # ------------------------------------------------------------------
     # Drawing helpers
@@ -495,6 +548,42 @@ class RenderEngine:
         title = self._font_title.render("PALETTE", True, COL_TEXT_PRIMARY)
         self._screen.blit(title, (pad, y))
         y += title.get_height() + SPACE_SM
+
+        # ---- Preset banner / dropdown ----
+        banner_h = 30
+        self._preset_banner_rect = pygame.Rect(pad, y, content_w, banner_h)
+        if self._active_preset is not None:
+            banner_fill = COL_ACCENT
+            banner_text = f"[{self._active_preset}] {PRESETS[self._active_preset]['title']}"
+        else:
+            banner_fill = COL_BG_CARD
+            banner_text = "Presets (1-8)"
+        self._draw_card(self._preset_banner_rect, banner_fill)
+        # Draw a small down-arrow indicator
+        arrow_x = self._preset_banner_rect.right - 16
+        arrow_cy = self._preset_banner_rect.y + banner_h // 2
+        arrow_pts = [(arrow_x - 4, arrow_cy - 3), (arrow_x + 4, arrow_cy - 3), (arrow_x, arrow_cy + 3)]
+        pygame.draw.polygon(self._screen, COL_TEXT_DIM, arrow_pts)
+        bt = self._font_label.render(banner_text, True, COL_TEXT_PRIMARY)
+        self._screen.blit(bt, (self._preset_banner_rect.x + SPACE_SM, self._preset_banner_rect.y + (banner_h - bt.get_height()) // 2))
+        y += banner_h + SPACE_XS
+
+        # Dropdown items (only when open)
+        self._preset_dropdown_rects = []
+        if self._preset_dropdown_open:
+            item_h = 24
+            for pnum in range(1, NUM_PRESETS + 1):
+                item_rect = pygame.Rect(pad, y, content_w, item_h)
+                self._preset_dropdown_rects.append((item_rect, pnum))
+                is_active = (pnum == self._active_preset)
+                fill = COL_BG_CARD_HOVER if is_active else COL_BG_CARD
+                self._draw_card(item_rect, fill)
+                item_label = f"{pnum}. {PRESETS[pnum]['title']}"
+                il = self._font_small.render(item_label, True, COL_TEXT_PRIMARY if is_active else COL_TEXT_SECONDARY)
+                self._screen.blit(il, (item_rect.x + SPACE_SM, item_rect.y + (item_h - il.get_height()) // 2))
+                y += item_h + 2
+            y += SPACE_XS
+        y += SPACE_XS
 
         # ---- Listener palette item ----
         item_h = 36
@@ -873,6 +962,39 @@ class RenderEngine:
                 )
                 self._update_layout()
 
+            elif event.type == pygame.KEYDOWN:
+                # Preset hotkeys: keys 1-8 load the corresponding preset
+                if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
+                                 pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8):
+                    preset_num = event.key - pygame.K_0
+                    self._load_preset(preset_num)
+                # Spacebar: toggle play/pause
+                elif event.key == pygame.K_SPACE:
+                    if self._selected_source_id is not None:
+                        src = self._state.get_source(self._selected_source_id)
+                        if src:
+                            self._state.set_source_playing(
+                                self._selected_source_id,
+                                not src.get("playing", False),
+                            )
+                    else:
+                        # No source selected — toggle all sources
+                        sources = self._state.get_sources()
+                        for sid, sinfo in sources.items():
+                            self._state.set_source_playing(
+                                sid, not sinfo.get("playing", False)
+                            )
+                # 0 or C: clear the scene entirely
+                elif event.key in (pygame.K_0, pygame.K_c):
+                    removed = self._state.clear_scene()
+                    for sid in removed:
+                        self._audio.remove_source(sid)
+                    self._active_preset = None
+                    self._selected_source_id = None
+                # Escape closes the dropdown
+                elif event.key == pygame.K_ESCAPE:
+                    self._preset_dropdown_open = False
+
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 self._on_mouse_down(event.pos)
 
@@ -887,6 +1009,20 @@ class RenderEngine:
 
         # --- Left sidebar interactions ---
         if mx < LEFT_SIDEBAR_W:
+            # Preset dropdown items (check BEFORE banner so items consume click first)
+            if self._preset_dropdown_open:
+                for item_rect, pnum in self._preset_dropdown_rects:
+                    if item_rect.collidepoint(mx, my):
+                        self._load_preset(pnum)
+                        return
+                # Click outside dropdown while open → close it
+                if self._preset_banner_rect and not self._preset_banner_rect.collidepoint(mx, my):
+                    self._preset_dropdown_open = False
+                    return
+            # Preset banner toggle
+            if self._preset_banner_rect and self._preset_banner_rect.collidepoint(mx, my):
+                self._preset_dropdown_open = not self._preset_dropdown_open
+                return
             # Palette: start drag
             if hasattr(self, '_listener_palette_rect') and self._listener_palette_rect.collidepoint(mx, my):
                 self._dragging = "listener"
@@ -1091,6 +1227,33 @@ class RenderEngine:
                     self._selected_source_id = None
 
     # ------------------------------------------------------------------
+    # On-screen canvas HUD badge
+    # ------------------------------------------------------------------
+    def _draw_canvas_hud(self) -> None:
+        """Semi-transparent floating pill at the top of the grid area."""
+        ox, _ = self._grid_origin()
+        grid_draw_w = GRID_COLS * self._cell_size
+
+        if self._active_preset is not None:
+            p = PRESETS[self._active_preset]
+            hud_text = f"Preset {self._active_preset}: {p['title']}  |  [Space] Play/Pause  [0] Clear"
+        else:
+            hud_text = "Press [1-8] for Presets  |  [Space] Play/Pause"
+
+        text_surf = self._font_label.render(hud_text, True, COL_TEXT_PRIMARY)
+        pill_w = text_surf.get_width() + 2 * SPACE_MD
+        pill_h = text_surf.get_height() + 2 * SPACE_SM
+        pill_x = ox + (grid_draw_w - pill_w) // 2
+        pill_y = SPACE_SM
+
+        # Draw on a SRCALPHA surface for semi-transparency
+        hud_surf = pygame.Surface((pill_w, pill_h), pygame.SRCALPHA)
+        pygame.draw.rect(hud_surf, (*COL_BG_CARD, 200), (0, 0, pill_w, pill_h), border_radius=CORNER_RADIUS)
+        pygame.draw.rect(hud_surf, (*COL_BORDER, 200), (0, 0, pill_w, pill_h), width=1, border_radius=CORNER_RADIUS)
+        hud_surf.blit(text_surf, (SPACE_MD, SPACE_SM))
+        self._screen.blit(hud_surf, (pill_x, pill_y))
+
+    # ------------------------------------------------------------------
     # Main render loop
     # ------------------------------------------------------------------
     def run(self) -> None:
@@ -1109,6 +1272,7 @@ class RenderEngine:
             self._draw_source_paths()
             self._draw_listener()
             self._draw_sources()
+            self._draw_canvas_hud()
             self._draw_left_sidebar()
             self._draw_right_sidebar()
             self._draw_drag_ghost()

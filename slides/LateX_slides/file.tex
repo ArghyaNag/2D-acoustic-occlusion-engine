@@ -168,14 +168,14 @@
       and sources on a grid, paint walls, and hear -- live -- how
       distance, obstruction, material, and reflection change the sound:
       \begin{itemize}\itemsep2.5pt
-        \item \textcolor{accent3}{\textbf{Muffling}} as paths get obstructed
-        \item \textbf{Panning} as sources move left / right
-        \item Delayed, directional \textbf{echoes}
-        \item Sound \textbf{bleeding through} walls
+        \item<2-> \textcolor{accent3}{\textbf{Muffling}} as paths get obstructed
+        \item<3-> \textbf{Panning} as sources move left / right
+        \item<4-> Delayed, directional \textbf{echoes}
+        \item<5-> Sound \textbf{bleeding through} walls
       \end{itemize}
 
       \vspace{14pt}
-      \flag[accent]{PYTHON}\;\flag[accent2]{PYGAME}\;\flag[accent3]{NUMPY}\;\flag[muted]{SOUNDDEVICE}
+      \onslide<6->{\flag[accent]{PYTHON}\;\flag[accent2]{PYGAME}\;\flag[accent3]{NUMPY}\;\flag[muted]{SOUNDDEVICE}}
     \end{column}
     \begin{column}{0.46\textwidth}
       \centering
@@ -184,14 +184,14 @@
           gnode/.style={flownode, minimum width=3.7cm, minimum height=0.82cm, inner sep=5pt, font=\small\bfseries},
           gnodealt/.style={flownodealt, minimum width=3.7cm, minimum height=0.82cm, inner sep=5pt, font=\small\bfseries}
         ]
-        \node[gnode] (a) {Grid Scene\\\scriptsize\normalfont listener, sources, walls};
-        \node[gnodealt, below=of a] (b) {Real-Time DSP\\\scriptsize\normalfont distance $\cdot$ filtering $\cdot$ echoes};
-        \node[gnode, below=of b] (c) {Spatial Audio\\\scriptsize\normalfont 44.1\,kHz stereo stream};
-        \draw[flowarrow] (a) -- (b);
-        \draw[flowarrow] (b) -- (c);
+        \node<7->[gnode] (a) {Grid Scene\\\scriptsize\normalfont listener, sources, walls};
+        \node<8->[gnodealt, below=of a] (b) {Real-Time DSP\\\scriptsize\normalfont distance $\cdot$ filtering $\cdot$ echoes};
+        \node<9->[gnode, below=of b] (c) {Spatial Audio\\\scriptsize\normalfont 44.1\,kHz stereo stream};
+        \draw<8->[flowarrow] (a) -- (b);
+        \draw<9->[flowarrow] (b) -- (c);
       \end{tikzpicture}\par
       \vspace{6pt}
-      {\scriptsize\textcolor{muted}{\textit{Live, interactive $\cdot$ all in Python}}}
+      \onslide<9->{{\scriptsize\textcolor{muted}{\textit{Live, interactive $\cdot$ all in Python}}}}
     \end{column}
   \end{columns}
 \end{frame}
@@ -205,21 +205,22 @@
       \small
       \textbf{\textcolor{accent}{Free Space is Trivial}}
       \begin{itemize}\itemsep1pt
-        \item Moving away $\to$ volume drops ($\text{gain}\propto 1/d$)
-        \item Moving sideways $\to$ stereo pan (left / right)
+        \item<2-> Moving away $\to$ volume drops ($\text{gain}\propto 1/d$)
+        \item<3-> Moving sideways $\to$ stereo pan (left / right)
       \end{itemize}
       \vspace{2pt}
-      {\scriptsize\textcolor{muted}{In a void, spatial audio is just basic amplitude scaling.}}
+      \onslide<3->{{\scriptsize\textcolor{muted}{In a void, spatial audio is just basic amplitude scaling.}}}
 
       \vspace{8pt}
-      \textbf{\textcolor{accent3}{Real Rooms Have Geometry}}
+      \onslide<4->{\textbf{\textcolor{accent3}{Real Rooms Have Geometry}}}
       \begin{itemize}\itemsep1pt
-        \item \textbf{Corners \& edges} -- diffract and muffle highs
-        \item \textbf{Solid walls} -- absorb, let muffled sound bleed through
-        \item \textbf{Surfaces} -- generate delayed, directional echoes
+        \item<5-> \textbf{Corners \& edges} -- diffract and muffle highs
+        \item<6-> \textbf{Solid walls} -- absorb, let muffled sound bleed through
+        \item<7-> \textbf{Surfaces} -- generate delayed, directional echoes
       \end{itemize}
     \end{column}
     \begin{column}{0.46\textwidth}
+      \onslide<8->{
       \begin{notebox}[The Central Challenge]
         \small\textit{``Can we simulate walls, materials, and echoes
         convincingly, live, using foundational signal-processing principles?''}
@@ -233,6 +234,7 @@
         interactive sandbox, built from stateful IIR filtering,
         delay lines, and 2D grid search.}}
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -243,6 +245,7 @@
 \begin{frame}{Audio Input Pipeline: Three Operational Modes}
   \begin{columns}[T]
     \begin{column}{0.315\textwidth}
+      \onslide<2->{
       \begin{notebox}[]
         \flag[accent]{MODE 1: AUDIO FILE}\par
         \vspace{6pt}
@@ -251,8 +254,10 @@
         \textbf{Pipeline:}\; Eagerly loaded into \texttt{float32} NumPy memory\\[3pt]
         \textbf{Role:}\; Instant testing with no audio hardware needed
       \end{notebox}
+      }
     \end{column}
     \begin{column}{0.315\textwidth}
+      \onslide<3->{
       \begin{notebox}[]
         \flag[accent2]{MODE 2: LOCAL MIC}\par
         \vspace{6pt}
@@ -261,8 +266,10 @@
         \textbf{Pipeline:}\; \texttt{sounddevice} circular stream buffer\\[3pt]
         \textbf{Role:}\; Real-time voice testing directly in the room
       \end{notebox}
+      }
     \end{column}
     \begin{column}{0.315\textwidth}
+      \onslide<4->{
       \begin{notebox}[]
         \flag[accent3]{MODE 3: NETWORK UDP}\par
         \vspace{6pt}
@@ -271,16 +278,19 @@
         \textbf{Pipeline:}\; UDP port \texttt{50007} to thread-safe queues\\[3pt]
         \textbf{Role:}\; Multi-source relay with client auto-reclaim
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 
   \vspace{10pt}
+  \onslide<5->{
   \begin{notebox}[]
     \centering\footnotesize
     \flag[accent]{HARDWARE VERIFIED}\quad
     \textcolor{ink}{\textbf{Live Multi-Device Validation:}}
     \textcolor{muted}{Mode 3 verified across physical laptops on an active LAN, firewall traversal included.}
   \end{notebox}
+  }
 \end{frame}
 
 %=====================================================================
@@ -308,6 +318,7 @@
 
   \vspace{10pt}
   \centering
+  \onslide<2->{
   \begin{tikzpicture}[
       node distance=1.0cm,
       hnode/.style={flownode, minimum width=2.4cm, minimum height=0.65cm, inner sep=4pt, font=\scriptsize\bfseries},
@@ -322,6 +333,7 @@
     \draw[flowarrow] (b) -- (c) node[midway, above=2pt, flowlabel]{queue};
     \draw[flowarrow] (c) -- (d) node[midway, above=2pt, flowlabel]{callback};
   \end{tikzpicture}
+  }
 \end{frame}
 
 %=====================================================================
@@ -335,6 +347,7 @@
 
   \vspace{14pt}
   \centering
+  \onslide<2->{
   \begin{notebox}[]
     \centering
     \flag[accent]{THE CHALLENGE}
@@ -344,16 +357,17 @@
     $(x, y)$ into natural volume attenuation and stereo balance ---
     without complex 3D physics?
   \end{notebox}
+  }
 
   \vspace{12pt}
   \raggedright
   \begin{itemize}
-    \item \textbf{Distance:} amplitude must decay smoothly -- no sudden dropoffs, no infinite volume at zero range
-    \item \textbf{Direction:} horizontal displacement must pan smoothly without losing volume when centered
+    \item<3-> \textbf{Distance:} amplitude must decay smoothly -- no sudden dropoffs, no infinite volume at zero range
+    \item<4-> \textbf{Direction:} horizontal displacement must pan smoothly without losing volume when centered
   \end{itemize}
 
   \vspace{10pt}
-  \textcolor{muted}{\scriptsize $\implies$ Next: translating spatial geometry into basic signal scaling and linear panning.}
+  \onslide<5->{\textcolor{muted}{\scriptsize $\implies$ Next: translating spatial geometry into basic signal scaling and linear panning.}}
 \end{frame}
 
 %=====================================================================
@@ -392,6 +406,7 @@
       \]
 
       \vspace{6pt}
+      \onslide<2->{
       \begin{notebox}[Key Properties]
         \scriptsize
         \begin{itemize}\itemsep1pt
@@ -400,6 +415,7 @@
           \item Pure NumPy: \texttt{mono * gain * pan}
         \end{itemize}
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -430,11 +446,13 @@
         processed in one NumPy broadcast.
       \end{notebox}
       \vspace{6pt}
+      \onslide<2->{
       \begin{notebox}[Live Demo Cue]
         \flag[accent2]{DEMO CUT}\; \scriptsize Move a single source
         circularly around the stationary listener on an open grid --
         volume and stereo balance shift live.
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -451,6 +469,7 @@
 
   \vspace{14pt}
   \centering
+  \onslide<2->{
   \begin{notebox}[]
     \centering
     \flag[accent]{THE CHALLENGE}
@@ -460,16 +479,17 @@
     in real time --- changing the spectral character of the signal,
     rather than just cutting its volume?
   \end{notebox}
+  }
 
   \vspace{12pt}
   \raggedright
   \begin{itemize}
-    \item Sound doesn't just stop; high frequencies are absorbed far faster than low frequencies
-    \item We need a lowpass filter whose cutoff adapts dynamically to obstacles
+    \item<3-> Sound doesn't just stop; high frequencies are absorbed far faster than low frequencies
+    \item<4-> We need a lowpass filter whose cutoff adapts dynamically to obstacles
   \end{itemize}
 
   \vspace{10pt}
-  \textcolor{muted}{\scriptsize $\implies$ Next: filtering architectures, the circular-convolution boundary artifact, and stateful IIR design.}
+  \onslide<5->{\textcolor{muted}{\scriptsize $\implies$ Next: filtering architectures, the circular-convolution boundary artifact, and stateful IIR design.}}
 \end{frame}
 
 %=====================================================================
@@ -498,9 +518,11 @@
         \item \textbf{Bit-continuous seams:} zero step discontinuities, zero boundary buzz
       \end{itemize}
       \vspace{4pt}
+      \onslide<2->{
       \begin{notebox}[Engineering Lesson]
         \scriptsize\textit{Block-based FFT without overlap-add is non-causal circular convolution. Real-time audio requires causal, state-preserving recursive filtering.}
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -539,7 +561,7 @@
         \item \textbf{Dynamic cutoff:} $f_c \in [300, 4000]$\,Hz dynamically adapts as geometry changes
       \end{itemize}
       \vspace{4pt}
-      \flag[muted]{IIR}\;\flag[accent]{SOS FORMAT}\;\flag[accent2]{-12 dB/OCT}
+      \onslide<2->{\flag[muted]{IIR}\;\flag[accent]{SOS FORMAT}\;\flag[accent2]{-12 dB/OCT}}
     \end{column}
   \end{columns}
 \end{frame}
@@ -574,10 +596,12 @@
          \item Independent filter state for direct, transmission, and echo paths
       \end{itemize}
       \vspace{2pt}
+      \onslide<2->{
       \begin{notebox}[Live Demo Cue]
         \flag[accent2]{DEMO CUT}\; \scriptsize Toggle a wall between
         source and listener -- smooth, artifact-free roll-off live.
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -593,6 +617,7 @@
 
   \vspace{14pt}
   \centering
+  \onslide<2->{
   \begin{notebox}[]
     \centering
     \flag[accent]{THE CHALLENGE}
@@ -602,16 +627,17 @@
     we quantify ``how obstructed'' a path is in arbitrary grid
     geometry, and map that directly to our lowpass filter?
   \end{notebox}
+  }
 
   \vspace{12pt}
   \raggedright
   \begin{itemize}
-    \item Sound finds the shortest open path around barriers -- not just the Euclidean line
-    \item Every direction change (corner diffraction) strips additional high-frequency energy
+    \item<3-> Sound finds the shortest open path around barriers -- not just the Euclidean line
+    \item<4-> Every direction change (corner diffraction) strips additional high-frequency energy
   \end{itemize}
 
   \vspace{10pt}
-  \textcolor{muted}{\scriptsize $\implies$ Next: pairing 8-directional graph search with corner-driven frequency damping.}
+  \onslide<5->{\textcolor{muted}{\scriptsize $\implies$ Next: pairing 8-directional graph search with corner-driven frequency damping.}}
 \end{frame}
 
 %=====================================================================
@@ -679,11 +705,13 @@
         \item Crisp highs in open space; corner muffling only behind real walls
       \end{itemize}
       \vspace{4pt}
+      \onslide<2->{
       \begin{notebox}[Live Demo Cue]
         \flag[accent2]{DEMO CUT}\; \scriptsize Compare two sources at
         equal distance: clear LoS vs.\ behind a wall corner.
         Listen for the brightness drop.
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -699,6 +727,7 @@
 
   \vspace{14pt}
   \centering
+  \onslide<2->{
   \begin{notebox}[]
     \centering
     \flag[accent]{THE CHALLENGE}
@@ -708,16 +737,17 @@
     model physical travel time in discrete-time digital audio
     without bogging down real-time performance?
   \end{notebox}
+  }
 
   \vspace{12pt}
   \raggedright
   \begin{itemize}
-    \item Instantaneous attenuation alone sounds unnatural and flat
-    \item Reflected waves must arrive later, proportional to their extra travel distance
+    \item<3-> Instantaneous attenuation alone sounds unnatural and flat
+    \item<4-> Reflected waves must arrive later, proportional to their extra travel distance
   \end{itemize}
 
   \vspace{10pt}
-  \textcolor{muted}{\scriptsize $\implies$ Next: translating physical distance into discrete-time sample shifts using circular buffers.}
+  \onslide<5->{\textcolor{muted}{\scriptsize $\implies$ Next: translating physical distance into discrete-time sample shifts using circular buffers.}}
 \end{frame}
 
 %=====================================================================
@@ -758,7 +788,7 @@
         \item Foundation for echo modeling in Challenges 6--7
       \end{itemize}
       \vspace{4pt}
-      \flag[accent3]{40 SAMPLES/UNIT}\;\flag[muted]{$f_s\!=\!44.1$ kHz}
+      \onslide<2->{\flag[accent3]{40 SAMPLES/UNIT}\;\flag[muted]{$f_s\!=\!44.1$ kHz}}
     \end{column}
   \end{columns}
 \end{frame}
@@ -794,11 +824,13 @@
         \item Same buffer structure reused for all 4 echo slots (Challenge 6)
       \end{itemize}
       \vspace{6pt}
+      \onslide<2->{
       \begin{notebox}[Live Demo Cue]
         \flag[accent2]{DEMO CUT}\; \scriptsize Place a source near a
         reflective wall; trigger a clap --- hear the direct sound
         followed by a distinct, delayed secondary arrival.
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -814,6 +846,7 @@
 
   \vspace{6pt}
   \centering
+  \onslide<2->{
   \begin{notebox}[]
     \centering
     \flag[accent]{THE CHALLENGE}
@@ -823,17 +856,18 @@
     how do we model acoustic penetration continuously --- without
     jarring volume jumps or artificial floor hacks?
   \end{notebox}
+  }
 
   \vspace{5pt}
   \raggedright
   \small
   \begin{itemize}\itemsep2pt
-    \item \textbf{Wave penetration:} Acoustic energy travels directly through solid wall matter
-    \item \textbf{Boundary continuity:} Sealing the final gap must fade smoothly without volume snaps
+    \item<3-> \textbf{Wave penetration:} Acoustic energy travels directly through solid wall matter
+    \item<4-> \textbf{Boundary continuity:} Sealing the final gap must fade smoothly without volume snaps
   \end{itemize}
 
   \vspace{5pt}
-  \textcolor{muted}{\scriptsize $\implies$ Next: why our initial ``floor gain'' shortcut failed, and how true material transmission replaced it.}
+  \onslide<5->{\textcolor{muted}{\scriptsize $\implies$ Next: why our initial ``floor gain'' shortcut failed, and how true material transmission replaced it.}}
 \end{frame}
 
 %=====================================================================
@@ -862,11 +896,13 @@
         \item \textbf{Always active:} when sealed, routed audio drops to 0 and transmission takes over smoothly
       \end{itemize}
       \vspace{4pt}
+      \onslide<2->{
       \begin{notebox}[The Architectural Fix]
         \scriptsize\textit{``No open path'' no longer snaps to a
         floor. Only transmission contributes, yielding a
         perfectly continuous transition.}
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -906,11 +942,13 @@
       \vspace{4pt}
       \flag{THROUGH-WALL}\;\flag[accent3]{NO SNAP}\;\flag[accent2]{PRODUCT $(1{-}\alpha)$}
       \vspace{4pt}
+      \onslide<2->{
       \begin{notebox}[Live Demo Cue]
         \flag[accent2]{DEMO CUT}\; \scriptsize Box in a source --
         sound bleeds through, dark and muffled. Swap concrete
         for curtains to hear transmission brighten live.
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -927,6 +965,7 @@
 
   \vspace{14pt}
   \centering
+  \onslide<2->{
   \begin{notebox}[]
     \centering
     \flag[accent]{THE CHALLENGE}
@@ -936,16 +975,17 @@
     ($k{=}2$). How do we discover, rank, and simulate multiple
     physically distinct reflections in real time?
   \end{notebox}
+  }
 
   \vspace{12pt}
   \raggedright
   \begin{itemize}
-    \item We want geometrically grounded early reflections off visible surfaces --- not a generic reverb blur
-    \item Each reflecting wall must sound like an independent source with its own delay, muffle, and angle
+    \item<3-> We want geometrically grounded early reflections off visible surfaces --- not a generic reverb blur
+    \item<4-> Each reflecting wall must sound like an independent source with its own delay, muffle, and angle
   \end{itemize}
 
   \vspace{10pt}
-  \textcolor{muted}{\scriptsize $\implies$ Next: radial ray-fan geometry paired with a multi-slot circular delay network.}
+  \onslide<5->{\textcolor{muted}{\scriptsize $\implies$ Next: radial ray-fan geometry paired with a multi-slot circular delay network.}}
 \end{frame}
 
 %=====================================================================
@@ -1049,11 +1089,13 @@
         \item Its own stereo pan (wall direction)
       \end{itemize}
       \vspace{4pt}
+      \onslide<2->{
       \begin{notebox}[Live Demo Cue]
         \flag[accent2]{DEMO CUT}\; \scriptsize Place a source between
         a concrete wall (left) and a wood wall (right) --- hear
         two distinct, spatially separated echoes.
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -1070,6 +1112,7 @@
 
   \vspace{14pt}
   \centering
+  \onslide<2->{
   \begin{notebox}[]
     \centering
     \flag[accent]{THE CHALLENGE}
@@ -1079,16 +1122,17 @@
     one coherent output --- and what prevents the combined signal
     from distorting when multiple loud sources mix?
   \end{notebox}
+  }
 
   \vspace{12pt}
   \raggedright
   \begin{itemize}
-    \item Do we need a complicated blending heuristic to glue these arrivals together?
-    \item When multiple sources sum, how do we guarantee signal stability?
+    \item<3-> Do we need a complicated blending heuristic to glue these arrivals together?
+    \item<4-> When multiple sources sum, how do we guarantee signal stability?
   \end{itemize}
 
   \vspace{10pt}
-  \textcolor{muted}{\scriptsize $\implies$ Next: the most fundamental concept in Signals \& Systems --- the principle of superposition.}
+  \onslide<5->{\textcolor{muted}{\scriptsize $\implies$ Next: the most fundamental concept in Signals \& Systems --- the principle of superposition.}}
 \end{frame}
 
 %=====================================================================
@@ -1128,7 +1172,7 @@
 
   \vspace{6pt}
   \centering
-  {\scriptsize\textcolor{muted}{No global re-normalization --- inverse-distance laws already scale each contribution.}}
+  \onslide<2->{{\scriptsize\textcolor{muted}{No global re-normalization --- inverse-distance laws already scale each contribution.}}}
 \end{frame}
 
 %=====================================================================
@@ -1160,9 +1204,11 @@
         \item Crisp slapback echoes off adjacent partitions
       \end{itemize}
       \vspace{2pt}
+      \onslide<2->{
       \begin{notebox}[The Grand Demo Cue]
         \flag[accent2]{DEMO CUT}\; \scriptsize Activate complex multi-wall scene --- hear diffraction, bleed, and echoes live at 44.1\,kHz.
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -1179,6 +1225,7 @@
 
   \vspace{14pt}
   \centering
+  \onslide<2->{
   \begin{notebox}[]
     \centering
     \flag[accent]{THE CHALLENGE}
@@ -1187,16 +1234,17 @@
     \normalsize How do we support diverse wall materials
     without introducing dozens of arbitrary, disconnected tuning knobs?
   \end{notebox}
+  }
 
   \vspace{12pt}
   \raggedright
   \begin{itemize}
-    \item Moving beyond binary ``wall vs.\ empty grid'' geometry
-    \item A unified parameter where reflectivity and transmission loss are inherently coupled
+    \item<3-> Moving beyond binary ``wall vs.\ empty grid'' geometry
+    \item<4-> A unified parameter where reflectivity and transmission loss are inherently coupled
   \end{itemize}
 
   \vspace{10pt}
-  \textcolor{muted}{\scriptsize $\implies$ Next: the three material classes and the conservation of acoustic energy.}
+  \onslide<5->{\textcolor{muted}{\scriptsize $\implies$ Next: the three material classes and the conservation of acoustic energy.}}
 \end{frame}
 
 %=====================================================================
@@ -1231,11 +1279,13 @@
 
       \flag{CONCRETE 0.90}\;\flag[accent2]{WOOD 0.60}\;\flag[accent3]{CURTAIN 0.25}
       \vspace{4pt}
+      \onslide<2->{
       \begin{notebox}[Live Demo Cue]
         \flag[accent2]{DEMO CUT}\; \scriptsize Paint a wall Concrete
         --- loud slapback. Repaint Curtain --- echo dulls,
         bleed-through brightens.
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -1268,10 +1318,12 @@
         \item \textbf{Choice:} render thread re-evaluates the cheap geometry functions independently ($<$1\,ms)
       \end{itemize}
       \vspace{4pt}
+      \onslide<2->{
       \begin{notebox}[Architecture Takeaway]
         \scriptsize\textit{Tiny duplicated CPU work in exchange for
         zero lock contention and complete thread safety.}
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -1303,10 +1355,12 @@
         \item Box in a source $\to$ teal disappears, dashed remains, magenta rays bounce inside
       \end{itemize}
       \vspace{4pt}
+      \onslide<2->{
       \begin{notebox}[Presentation Tip]
         \scriptsize\textit{During the demo, point to the colored path
         lines to explain which formula is feeding the speakers.}
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -1339,9 +1393,11 @@
         \item \textbf{Visual proof:} audience sees HF bars drop as wall is added
       \end{itemize}
       \vspace{2pt}
+      \onslide<2->{
       \begin{notebox}[Live Demo Cue]
         \flag[accent2]{DEMO CUT}\; \scriptsize Toggle a wall: watch HF bars drop instantly as sound muffles.
       \end{notebox}
+      }
     \end{column}
   \end{columns}
 \end{frame}
@@ -1376,7 +1432,7 @@
   \centering
   \fadebar{5.0}
   \vspace{6pt}
-  {\small\textcolor{muted}{\\A complete from-scratch layered audio model, built from recursive IIR filtering, delay networks, and 2D grid search.}}
+  \onslide<2->{{\small\textcolor{muted}{\\A complete from-scratch layered audio model, built from recursive IIR filtering, delay networks, and 2D grid search.}}}
 \end{frame}
 
 %=====================================================================
@@ -1409,10 +1465,12 @@
 
   \vspace{16pt}
   \noindent
+  \onslide<2->{
   \flag[accent]{3 INPUT MODES}\hfill
   \flag[accent2]{3 WALL FAMILIES}\hfill
   \flag[accent3]{117+ ASSERTIONS}\hfill
   \flag[muted]{ZERO DEAD CODE}
+  }
 \end{frame}
 
 %=====================================================================
@@ -1441,7 +1499,7 @@
 
   \vspace{3pt}
   \centering
-  \flag{HOTKEYS 1--8}\;\flag[accent2]{8 PRESET SCENES}\;\flag[accent3]{117+ PASSING TESTS}\;\flag[muted]{LIVE DEMO}
+  \onslide<2->{\flag{HOTKEYS 1--8}\;\flag[accent2]{8 PRESET SCENES}\;\flag[accent3]{117+ PASSING TESTS}\;\flag[muted]{LIVE DEMO}}
 \end{frame}
 
 %=====================================================================
